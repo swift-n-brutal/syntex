@@ -12,7 +12,7 @@ from tensorpack.tfutils.tower import TowerContext, TowerFuncWrapper
 from tensorpack.utils import logger
 from tensorpack.utils.argtools import memoized_method
 
-from texture import Vgg19Extractor, build_gram, build_texture_loss
+from syntex.texture_utils import Vgg19Extractor, build_gram, build_texture_loss
 from aparse import ArgParser
 
 class SynTexModelDesc(ModelDescBase):

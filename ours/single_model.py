@@ -10,7 +10,7 @@ from tensorpack import (InstanceNorm, LinearWrap, Conv2D, Conv2DTranspose,
 from tensorpack.tfutils.summary import add_moving_summary
 
 from aparse import ArgParser
-from texture import build_texture_loss
+from syntex.texture_utils import build_texture_loss
 from model import SynTexModelDesc, SynTexTrainer, RandomZData
 
 IMAGESIZE = 256
@@ -124,7 +124,7 @@ class SingleSynTex(SynTexModelDesc):
         self.loss_layer_output = loss_layer_output
         # average losses from all stages
         weights = [1.]
-        for i in range(len(self.losses) - 1):
+        for _ in range(len(self.losses) - 1):
             weights.append(weights[-1] * self._loss_scale)
         # skip the first loss as it is computed from noise
         self.loss = tf.add_n([weights[i] * loss \
@@ -215,12 +215,12 @@ class VisualizeTestSet(Callback):
 
 if __name__ == "__main__":
     ps = SingleSynTex.get_parser()
-    ps.add("--data-folder", type=str, default="images/single_12")
+    ps.add("--data-folder", type=str, default="../images/single_12")
     args = ps.parse_args()
     print("Arguments")
     ps.print_args()
     print()
-    data_folder = args.get("data_folder", "images/single_12")
+    data_folder = args.get("data_folder", "../images/single_12")
 
     logger.auto_set_dir()
 

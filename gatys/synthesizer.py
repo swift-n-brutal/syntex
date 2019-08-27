@@ -4,8 +4,7 @@ from collections import OrderedDict
 from scipy.optimize import minimize
 
 from aparse import ArgParser
-from .vgg19_extractor import Vgg19Extractor
-from .utils import build_gram, build_texture_loss, NP_DTYPE, TF_DTYPE
+from syntex.texture_utils import Vgg19Extractor, build_gram, build_texture_loss
 
 def get_bounds(shape=None):
     bounds = list()
@@ -52,7 +51,7 @@ class Synthesizer(object):
     def build(self):
         vgg19 = Vgg19Extractor(self.vgg19_path)
         self.shape_input = [1, self.image_size, self.image_size, 3]
-        ph_input = tf.placeholder(TF_DTYPE, shape=self.shape_input, name="inputs")
+        ph_input = tf.placeholder(tf.float32, shape=self.shape_input, name="inputs")
         #
         feat_input = vgg19.build(ph_input, "ext_input")
         gram_input = OrderedDict()
@@ -66,7 +65,7 @@ class Synthesizer(object):
                 for k in Synthesizer.DEFAULT_COEFS:
                     gram_target[k] = tf.get_variable("gram_"+k,
                             shape=gram_input[k].shape.as_list(),
-                            dtype=TF_DTYPE, trainable=False)
+                            dtype=tf.float32, trainable=False)
                     op_update_gram_target.append(tf.assign(gram_target[k], gram_input[k]))
         #
         if not self.gram_only:
@@ -108,3 +107,32 @@ class Synthesizer(object):
         res = minimize(f, image_init, method="L-BFGS-B", jac=True,
                 bounds=bounds, options=self.options)
         return res["x"].reshape(self.shape_input[1:]), res["fun"]
+
+
+def test():
+    from imageio import imread
+    import time
+
+    from syntex.visualization import ImageDisplay, get_plottable_data
+
+    ps = Synthesizer.get_parser()
+    args = ps.parse_args()
+    #
+    image_target = imread("../images/flower_beds_256/FlowerBeds0008_256.jpg", pilmode="RGB") / 255.
+    image_init = np.random.uniform(1./255, 1. - 1./255, size=image_target.shape)
+    #
+    start_time = time.time()
+    config = tf.ConfigProto(log_device_placement=False, device_count={"GPU": 0})
+    with tf.Session(config=config) as sess:
+        syn = Synthesizer(args, sess)
+        syn.build()
+        image_syn, fun = syn.synthesize(image_init, image_target)
+    print("Finished (%.2f sec)" % (time.time() - start_time))
+    #
+    imdp = ImageDisplay()
+    imdp.show_images([
+        (get_plottable_data(image_target, scale=255.), "Original"),
+        (get_plottable_data(image_syn, scale=255.), "%.4e" % fun)])
+
+if __name__ == "__main__":
+    test()
