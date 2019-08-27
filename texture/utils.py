@@ -46,7 +46,7 @@ def build_texture_loss(a, b, coefs, is_gram_a=False, is_gram_b=True,
             gram_diff = gram_a[k] - gram_b[k]
             loss_layer[k] = tf.reduce_mean(tf.square(gram_diff),
                     axis=[1,2], name="l2_"+k)
-        loss_overall = tf.add_n([coefs[k]*1./4 * loss_layer[k] for k in loss_layer[k], name="loss_overall")
+        loss_overall = tf.add_n([coefs[k]*1./4 * loss_layer[k] for k in loss_layer], name="loss_overall")
     if calc_grad:
         grad_layer = OrderedDict()
         for k in gram_a:

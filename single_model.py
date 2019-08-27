@@ -54,6 +54,7 @@ class SingleSynTex(SynTexModelDesc):
 
     @staticmethod
     def get_parser(ps=None):
+        ps = SynTexModelDesc.get_parser(ps)
         ps = ArgParser(ps, name="single")
         ps.add("--image-size", type=int, default=IMAGESIZE)
         ps.add("--lr", type=float, default=LR)
@@ -213,7 +214,13 @@ class VisualizeTestSet(Callback):
 
 
 if __name__ == "__main__":
-    data_folder = "images/single_12"
+    ps = SingleSynTex.get_parser()
+    ps.add("--data-folder", type=str, default="images/single_12")
+    args = ps.parse_args()
+    print("Arguments")
+    ps.print_args()
+    print()
+    data_folder = args.get("data_folder", "images/single_12")
 
     logger.auto_set_dir()
 
@@ -221,7 +228,7 @@ if __name__ == "__main__":
     df = PrintData(df)
     data = QueueInput(df)
 
-    SynTexTrainer(data, SingleSynTex(dict())).train_with_defaults(
+    SynTexTrainer(data, SingleSynTex(args)).train_with_defaults(
         callbacks=[
             ModelSaver(),
             ScheduledHyperParamSetter(
