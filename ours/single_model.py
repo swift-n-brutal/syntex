@@ -47,6 +47,8 @@ class SingleSynTex(SynTexModelDesc):
         else:
             raise ValueError("Invalid activation: " + str(type(act)))
         self._loss_scale = args.get("loss_scale", 0.)
+        self._pre_act = args.get("pre_act", False)
+        self._nn_upsample = args.get("nn_upsample", False)
 
     def inputs(self):
         return [tf.TensorSpec((None, self._image_size, self._image_size, 3), tf.float32, 'pre_image_input'),
@@ -64,18 +66,69 @@ class SingleSynTex(SynTexModelDesc):
         ps.add("--n-block", type=int, default=2, help="number of res blocks in each scale.")
         ps.add("--act", type=str, default="sigmoid", choices=["sigmoid", "tanh", "identity"])
         ps.add("--loss-scale", type=float, default=0.)
+        ps.add_flag("--pre-act")
+        ps.add_flag("--nn-upsample")
         return ps
 
     @staticmethod
     def build_res_block(x, name, chan, first=False):
+        """The value of input is considered to be computed after normalization
+        but before non-linearity. So the activation function is needed to be
+        applied in the residual branch.
+
+        This implementation assumes that the input and output dimensions are
+        consistent. The upsampling and downsampling are implemented in other
+        modules such as Conv2D_Transpose and Conv2d, or resize_nearest_neighbor
+        and avg_pool.
+        """
         with tf.variable_scope(name):
-            input = x
-            return (LinearWrap(x)
+            assert x.get_shape().as_list()[-1] == chan
+            shortcut = x
+            res_input = tf.nn.relu(x, "act_input")
+            return (LinearWrap(res_input)
                 .tf.pad([[0, 0], [1, 1], [1, 1], [0, 0]], mode="SYMMETRIC")
                 .Conv2D('conv0', chan, 3, padding="VALID")
                 .tf.pad([[0, 0], [1, 1], [1, 1], [0, 0]], mode="SYMMETRIC")
                 .Conv2D('conv1', chan, 3, padding="VALID", activation=tf.identity)
-                .InstanceNorm('inorm')()) + input
+                .InstanceNorm('inorm')
+            )() + shortcut
+
+    @ staticmethod
+    def build_pre_res_block(x, name, chan, first=False):
+        """The value of input is considered to be computed before normalization
+        and non-linearity. So the normalization and activation functions are
+        needed to be applied in the residual branch.
+
+        This implementation assumes that the input and output dimensions are
+        consistent. The upsampling and downsampling are implemented in other
+        modules such as Conv2D_Transpose and Conv2d, or resize_nearest_neighbor
+        and avg_pool.
+        """
+        with tf.variable_scope(name):
+            assert x.get_shape().as_list()[-1] == chan
+            shortcut = x
+            res_input = INReLU(x, "act_input")
+            return (LinearWrap(res_input)
+                .tf.pad([[0,0], [1,1], [1,1], [0,0]], mode="SYMMETRIC")
+                .Conv2D("conv0", chan, 3, padding="VALID")
+                .tf.pad([[0,0], [1,1], [1,1], [0,0]], mode="SYMMETRIC")
+                .Conv2D("conv1", chan, 3, padding="VALID", activation=tf.identity)
+            )() + shortcut
+
+    @staticmethod
+    def build_upsampling_nn(x, name, scale=2, chan=None, ksize=None):
+        _, h, w, _ = x.get_shape().as_list()
+        new_size = [h*scale, w*scale]
+        return tf.image.resize_nearest_neighbor(x, size=new_size, name=name)
+
+    @staticmethod
+    def build_upsampling_deconv(x, name, scale=2, chan=None, ksize=None):
+        if chan is None:
+            chan = x.get_shape().as_list()[-1]
+        if ksize is None:
+            ksize = scale
+        return Conv2DTranspose(name, x, chan, ksize,
+            strides=scale, activation=tf.identity, use_bias=False)
 
     def build_graph(self, pre_image_input, image_target):
         """
@@ -134,6 +187,10 @@ class SingleSynTex(SynTexModelDesc):
         add_moving_summary(self.loss, *self.losses)
 
     def build_stage(self, pre_image_input, gram_target, name="stage"):
+        res_block = SingleSynTex.build_pre_res_block if self._pre_act \
+            else SingleSynTex.build_res_block
+        upsample = SingleSynTex.build_upsampling_nn if self._nn_upsample \
+            else SingleSynTex.build_upsampling_deconv
         with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
             image_input = self._act(pre_image_input, name="input_"+name)
             feat_input, _ = self._build_extractor(image_input, calc_gram=False)
@@ -144,28 +201,44 @@ class SingleSynTex(SynTexModelDesc):
             # remember the characteristics of the texture. Thus, we do not
             # provide the grad information to the synthisizer through any
             # intermediate layers, but only through the final loss.
-            # f[4] -> res[4] -> up[4] +
-            #                    f[3] -> res[3] -> up[3] +
-            #                                       f[2] -> res[2] -> up[2] +
-            #                                                          f[1] -> res[1] -> up[1] +
-            #                                                                             f[0] -> res[0] -> output
-            with argscope([Conv2D, Conv2DTranspose], activation=INReLU):
+            #            none +
+            # f[4] -> conv[4] -> res[4] -> up[4] +
+            #                    f[3] -> conv[3] -> res[3] -> up[3] +
+            #                                       f[2] -> conv[2] -> res[2] -> up[2] +
+            #                                                               ... ...
+            #                                                 up[1] +
+            #                                       f[0] -> conv[0] -> res[0] -> output
+            with argscope([Conv2D, Conv2DTranspose], activation=INReLU, use_bias=False):
                 first = True
                 for layer in reversed(feat_input):
                     feat = feat_input[layer]
                     chan = feat.get_shape().as_list()[-1]
-                    if first:
-                        l = tf.identity(feat, name=layer+"_iden")
-                        first = False
-                    else:
-                        l = Conv2DTranspose(layer+"_deconv", l, chan, 3, strides=2, activation=tf.identity)
-                        l = tf.add(feat, l, name=layer+"_add")
-                        l = InstanceNorm(layer+"_inorm", l)
-                    for k in range(self._n_block):
-                        l = SingleSynTex.build_res_block(l, layer+"_res{}".format(k), chan, first=(k == 0))
+                    with tf.variable_scope(layer):
+                        # compute pseudo grad of current layer
+                        grad = Conv2D("grad_conv", feat, chan, 3, activation=tf.identity)
+                        if not self._pre_act:
+                            grad = InstanceNorm("grad_inorm", grad)
+                        # merge with grad from deeper layers
+                        if first:
+                            delta = tf.identity(grad, name="grad_merged")
+                            first = False
+                        else:
+                            # upsample deeper grad
+                            delta = upsample(delta, "up", chan=chan)
+                            delta = tf.pad(delta, [[0,0], [2,2], [2,2], [0,0]], mode="SYMMETRIC")
+                            delta = Conv2D("conv", delta, chan, 5, padding="VALID", activation=tf.identity)
+                            if not self._pre_act:
+                                delta = InstanceNorm("inorm", delta)
+                            delta = tf.add(grad, delta, name="grad_merged")
+                        for k in range(self._n_block):
+                            delta = res_block(delta, "res{}".format(k), chan, first=(k == 0))
                 # output
-                l = tf.pad(l, [[0, 0], [1, 1], [1, 1], [0, 0]])
-                delta_input = Conv2D("convlast", l, 3, 3, padding="VALID", activation=tf.identity, use_bias=True)
+                if self._pre_act:
+                    delta = INReLU(delta, "actlast")
+                else:
+                    delta = tf.nn.relu(delta, "actlast")
+                delta = tf.pad(delta, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="SYMMETRIC")
+                delta_input = Conv2D("convlast", delta, 3, 3, padding="VALID", activation=tf.identity, use_bias=True)
             pre_image_output = tf.add(pre_image_input, delta_input, name="pre_image_output")
         return image_input, loss_overall_input, loss_layer_input, pre_image_output
 
@@ -186,7 +259,7 @@ def get_data(datadir, size=IMAGESIZE, isTrain=True):
     def get_images(dir):
         files = sorted(glob.glob(os.path.join(dir, "*.jpg")))
         df = ImageFromFile(files, channel=3, shuffle=isTrain)
-        random_df = RandomZData([IMAGESIZE, IMAGESIZE, 3], -1, 1)
+        random_df = RandomZData([size, size, 3], -1, 1)
         return JoinData([random_df, AugmentImageComponent(df, augs)])
     
     names = ['train']  if isTrain else ['test']
@@ -196,13 +269,16 @@ def get_data(datadir, size=IMAGESIZE, isTrain=True):
 
 
 class VisualizeTestSet(Callback):
+    def __init__(self, data_folder, image_size):
+        self._data_folder = data_folder
+        self._image_size = image_size
+
     def _setup_graph(self):
         self.pred = self.trainer.get_predictor(
             ["pre_image_input", "image_target"], ['stages-target/viz'])
 
     def _before_train(self):
-        global data_folder
-        self.val_ds = get_data(data_folder, isTrain=False)
+        self.val_ds = get_data(self._data_folder, self._image_size, isTrain=False)
         self.val_ds.reset_state()
 
     def _trigger(self):
@@ -223,13 +299,14 @@ if __name__ == "__main__":
     print()
     data_folder = args.get("data_folder", "../images/single_12")
     save_folder = args.get("save_folder", "train_log/single_model")
+    image_size = args.get("image_size", IMAGESIZE)
 
     if save_folder == None:
         logger.auto_set_dir()
     else:
         logger.set_logger_dir(save_folder)
 
-    df = get_data(data_folder)
+    df = get_data(data_folder, image_size)
     df = PrintData(df)
     data = QueueInput(df)
 
@@ -239,7 +316,7 @@ if __name__ == "__main__":
             ScheduledHyperParamSetter(
                 'learning_rate',
                 [(100, 2e-4), (200, 0)], interp="linear"),
-            #PeriodicTrigger(VisualizeTestSet(), every_k_epochs=10),
+            #PeriodicTrigger(VisualizeTestSet(data_folder, image_size), every_k_epochs=10),
             MergeAllSummaries(period=10),
         ],
         max_epoch= 195,
