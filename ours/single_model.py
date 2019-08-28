@@ -216,13 +216,18 @@ class VisualizeTestSet(Callback):
 if __name__ == "__main__":
     ps = SingleSynTex.get_parser()
     ps.add("--data-folder", type=str, default="../images/single_12")
+    ps.add("--save-folder", type=str, default="train_log/single_model")
     args = ps.parse_args()
     print("Arguments")
     ps.print_args()
     print()
     data_folder = args.get("data_folder", "../images/single_12")
+    save_folder = args.get("save_folder", "train_log/single_model")
 
-    logger.auto_set_dir()
+    if save_folder == None:
+        logger.auto_set_dir()
+    else:
+        logger.set_logger_dir(save_folder)
 
     df = get_data(data_folder)
     df = PrintData(df)
