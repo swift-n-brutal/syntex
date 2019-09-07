@@ -19,7 +19,7 @@ LR = 5e-5
 BETA1 = 0.9
 BETA2 = 0.999
 BATCH = 1
-TEST_BATCH = 32
+TEST_BATCH = 1
 
 def INReLU(x, name=None):
     x = InstanceNorm('inorm', x)
@@ -29,9 +29,9 @@ def INLReLU(x, name=None):
     x = InstanceNorm('inorm', x)
     return tf.nn.leaky_relu(x, alpha=0.2, name=name)
 
-class SingleSynTex(SynTexModelDesc):
+class AdaptiveSynTex(SynTexModelDesc):
     def __init__(self, args):
-        super(SingleSynTex, self).__init__(args)
+        super(AdaptiveSynTex, self).__init__(args)
         self._image_size = args.get("image_size", IMAGESIZE)
         self._lr = args.get("lr", LR)
         self._beta1 = args.get("beta1", BETA1)
@@ -58,7 +58,7 @@ class SingleSynTex(SynTexModelDesc):
     @staticmethod
     def get_parser(ps=None):
         ps = SynTexModelDesc.get_parser(ps)
-        ps = ArgParser(ps, name="single")
+        ps = ArgParser(ps, name="adaptive")
         ps.add("--image-size", type=int, default=IMAGESIZE)
         ps.add("--lr", type=float, default=LR)
         ps.add("--beta1", type=float, default=BETA1)
@@ -140,34 +140,34 @@ class SingleSynTex(SynTexModelDesc):
             strides=scale, activation=tf.identity, use_bias=False)
 
     def build_stage(self, pre_image_input, gram_target, name="stage"):
-        res_block = SingleSynTex.build_pre_res_block if self._pre_act \
-            else SingleSynTex.build_res_block
-        upsample = SingleSynTex.build_upsampling_nn if self._nn_upsample \
-            else SingleSynTex.build_upsampling_deconv
+        res_block = AdaptiveSynTex.build_pre_res_block if self._pre_act \
+            else AdaptiveSynTex.build_res_block
+        upsample = AdaptiveSynTex.build_upsampling_nn if self._nn_upsample \
+            else AdaptiveSynTex.build_upsampling_deconv
         with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
             # extract features and gradients
             image_input = self._act(pre_image_input, name="input_"+name)
             feat_input, _ = self._build_extractor(image_input, calc_gram=False)
-            loss_overall_input, loss_layer_input, _ = \
+            loss_overall_input, loss_layer_input, grad_layer = \
                 build_texture_loss(feat_input, gram_target,
-                    SynTexModelDesc.DEFAULT_COEFS, calc_grad=False, name="grad")
-            # For a single texture synthesizer, we don't provide gradients to the
-            # synthesizer. That information is implicitly provided by final loss.
+                    SynTexModelDesc.DEFAULT_COEFS, calc_grad=True, name="grad")
+            # For an adaptive texture synthesizer, we provide gradients explicitly to
+            # the synthesizer.
             #            none +
-            # f[4] -> conv[4] -> res[4] -> up[4] +
-            #                    f[3] -> conv[3] -> res[3] -> up[3] +
-            #                                       f[2] -> conv[2] -> res[2] -> up[2] +
+            # grad[4] conv[4] -> res[4] -> up[4] +
+            #                    grad[3] conv[3] -> res[3] -> up[3] +
+            #                                       grad[2] conv[2] -> res[2] -> up[2] +
             #                                                               ... ...
             #                                                 up[1] +
-            #                                       f[0] -> conv[0] -> res[0] -> output
+            #                                       grad[0] conv[0] -> res[0] -> output
             with argscope([Conv2D, Conv2DTranspose], activation=INReLU, use_bias=False):
                 first = True
                 for layer in reversed(feat_input):
-                    feat = feat_input[layer]
-                    chan = feat.get_shape().as_list()[-1]
+                    grad = grad_layer[layer]
+                    chan = grad.get_shape().as_list()[-1]
                     with tf.variable_scope(layer):
                         # compute pseudo grad of current layer
-                        grad = Conv2D("grad_conv1", feat, chan, 3)
+                        grad = Conv2D("grad_conv1", grad, chan, 3)
                         grad = Conv2D("grad_conv2", grad, chan, 3, activation=tf.identity)
                         # merge with grad from deeper layers
                         if first:
@@ -241,6 +241,7 @@ class SingleSynTex(SynTexModelDesc):
             self._build_loss(image_output, gram_target, calc_grad=False)
         self.image_outputs.append(image_output)
         self.losses.append(tf.reduce_mean(loss_overall_output, name="loss_output"))
+        self.loss_layer_output = loss_layer_output
         self.loss_layer_output = OrderedDict()
         with tf.name_scope("loss_layer_output"):
             for layer in loss_layer_output:
@@ -298,13 +299,16 @@ class VisualizeTestSet(Callback):
     def _trigger(self):
         idx = 0
         for pii, it in self.val_ds:
+            print("------------------ predict --------------")
+            print(pii.shape, pii.dtype)
+            print(it.shape, it.dtype)
             viz = self.pred(pii, it)
             self.trainer.monitors.put_image('test-{}'.format(idx), viz)
             idx += 1
 
 
 if __name__ == "__main__":
-    ps = SingleSynTex.get_parser()
+    ps = AdaptiveSynTex.get_parser()
     ps.add("--data-folder", type=str, default="../images/single_12")
     ps.add("--save-folder", type=str, default="train_log/single_model")
     ps.add("--steps-per-epoch", type=int, default=1000)
@@ -338,7 +342,7 @@ if __name__ == "__main__":
     df = PrintData(df)
     data = QueueInput(df)
 
-    SynTexTrainer(data, SingleSynTex(args)).train_with_defaults(
+    SynTexTrainer(data, AdaptiveSynTex(args)).train_with_defaults(
         callbacks=[
             PeriodicTrigger(ModelSaver(), every_k_epochs=save_epoch),
             PeriodicTrigger(ModelSaver(), every_k_epochs=end_epoch), # save model at last

@@ -19,7 +19,7 @@ LR = 5e-5
 BETA1 = 0.9
 BETA2 = 0.999
 BATCH = 1
-TEST_BATCH = 32
+TEST_BATCH = 1
 
 def INReLU(x, name=None):
     x = InstanceNorm('inorm', x)
@@ -29,14 +29,15 @@ def INLReLU(x, name=None):
     x = InstanceNorm('inorm', x)
     return tf.nn.leaky_relu(x, alpha=0.2, name=name)
 
-class SingleSynTex(SynTexModelDesc):
+class ProgressiveSynTex(SynTexModelDesc):
     def __init__(self, args):
-        super(SingleSynTex, self).__init__(args)
+        super(ProgressiveSynTex, self).__init__(args)
         self._image_size = args.get("image_size", IMAGESIZE)
         self._lr = args.get("lr", LR)
         self._beta1 = args.get("beta1", BETA1)
         self._beta2 = args.get("beta2", BETA2)
-        self._n_stage = args.get("n_stage", 1)
+        #self._n_stage = args.get("n_stage", 1)
+        self._n_stage = 5
         self._n_block = args.get("n_block", 2)
         act = args.get("act", "sigmoid")
         if act == "sigmoid":
@@ -58,15 +59,15 @@ class SingleSynTex(SynTexModelDesc):
     @staticmethod
     def get_parser(ps=None):
         ps = SynTexModelDesc.get_parser(ps)
-        ps = ArgParser(ps, name="single")
+        ps = ArgParser(ps, name="progressive")
         ps.add("--image-size", type=int, default=IMAGESIZE)
         ps.add("--lr", type=float, default=LR)
         ps.add("--beta1", type=float, default=BETA1)
         ps.add("--beta2", type=float, default=BETA2)
-        ps.add("--n-stage", type=int, default=1)
+        ps.add("--n-stage", type=int, default=5, help="This argument is fixed to 5.")
         ps.add("--n-block", type=int, default=2, help="number of res blocks in each scale.")
         ps.add("--act", type=str, default="sigmoid", choices=["sigmoid", "tanh", "identity"])
-        ps.add("--loss-scale", type=float, default=0.)
+        ps.add("--loss-scale", type=float, default=1.)
         ps.add_flag("--pre-act")
         ps.add_flag("--deconv-upsample")
         return ps
@@ -139,54 +140,57 @@ class SingleSynTex(SynTexModelDesc):
         return Conv2DTranspose(name, x, chan, ksize,
             strides=scale, activation=tf.identity, use_bias=False)
 
-    def build_stage(self, pre_image_input, gram_target, name="stage"):
-        res_block = SingleSynTex.build_pre_res_block if self._pre_act \
-            else SingleSynTex.build_res_block
-        upsample = SingleSynTex.build_upsampling_nn if self._nn_upsample \
-            else SingleSynTex.build_upsampling_deconv
+    def build_stage(self, pre_image_input, gram_target, n_loss_layer, name="stage"):
+        res_block = ProgressiveSynTex.build_pre_res_block if self._pre_act \
+            else ProgressiveSynTex.build_res_block
+        upsample = ProgressiveSynTex.build_upsampling_nn if self._nn_upsample \
+            else ProgressiveSynTex.build_upsampling_deconv
+        coefs = OrderedDict()
+        for k in list(SynTexModelDesc.DEFAULT_COEFS.keys())[:n_loss_layer]:
+            coefs[k] = SynTexModelDesc.DEFAULT_COEFS[k]
         with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
             # extract features and gradients
             image_input = self._act(pre_image_input, name="input_"+name)
             feat_input, _ = self._build_extractor(image_input, calc_gram=False)
-            loss_overall_input, loss_layer_input, _ = \
-                build_texture_loss(feat_input, gram_target,
-                    SynTexModelDesc.DEFAULT_COEFS, calc_grad=False, name="grad")
-            # For a single texture synthesizer, we don't provide gradients to the
-            # synthesizer. That information is implicitly provided by final loss.
+            loss_overall_input, loss_layer_input, grad_layer = \
+                build_texture_loss(feat_input, gram_target, coefs, calc_grad=True, name="grad")
+            # For an adaptive texture synthesizer, we provide gradients explicitly to
+            # the synthesizer.
             #            none +
-            # f[4] -> conv[4] -> res[4] -> up[4] +
-            #                    f[3] -> conv[3] -> res[3] -> up[3] +
-            #                                       f[2] -> conv[2] -> res[2] -> up[2] +
+            # grad[4] conv[4] -> res[4] -> up[4] +
+            #                    grad[3] conv[3] -> res[3] -> up[3] +
+            #                                       grad[2] conv[2] -> res[2] -> up[2] +
             #                                                               ... ...
             #                                                 up[1] +
-            #                                       f[0] -> conv[0] -> res[0] -> output
+            #                                       grad[0] conv[0] -> res[0] -> output
             with argscope([Conv2D, Conv2DTranspose], activation=INReLU, use_bias=False):
                 first = True
                 for layer in reversed(feat_input):
-                    feat = feat_input[layer]
-                    chan = feat.get_shape().as_list()[-1]
-                    with tf.variable_scope(layer):
-                        # compute pseudo grad of current layer
-                        grad = Conv2D("grad_conv1", feat, chan, 3)
-                        grad = Conv2D("grad_conv2", grad, chan, 3, activation=tf.identity)
-                        # merge with grad from deeper layers
-                        if first:
-                            delta = tf.identity(grad, name="grad_merged")
-                            first = False
-                        else:
-                            # upsample deeper grad
-                            if self._pre_act:
-                                delta = INReLU(delta, "pre_inrelu")
+                    if layer in grad_layer:
+                        grad = grad_layer[layer]
+                        chan = grad.get_shape().as_list()[-1]
+                        with tf.variable_scope(layer):
+                            # compute pseudo grad of current layer
+                            grad = Conv2D("grad_conv1", grad, chan, 3)
+                            grad = Conv2D("grad_conv2", grad, chan, 3, activation=tf.identity)
+                            # merge with grad from deeper layers
+                            if first:
+                                delta = tf.identity(grad, name="grad_merged")
+                                first = False
                             else:
-                                delta = tf.nn.relu(delta, "pre_relu")
-                            delta = upsample(delta, "up", chan=chan)
-                            # add two grads
-                            delta = tf.add(grad, delta, name="grad_merged")
-                        if not self._pre_act:
-                            delta = InstanceNorm("post_inorm", delta)
-                        # simulate the backpropagation procedure to next level
-                        for k in range(self._n_block):
-                            delta = res_block(delta, "res{}".format(k), chan, first=(k == 0))
+                                # upsample deeper grad
+                                if self._pre_act:
+                                    delta = INReLU(delta, "pre_inrelu")
+                                else:
+                                    delta = tf.nn.relu(delta, "pre_relu")
+                                delta = upsample(delta, "up", chan=chan)
+                                # add two grads
+                                delta = tf.add(grad, delta, name="grad_merged")
+                            if not self._pre_act:
+                                delta = InstanceNorm("post_inorm", delta)
+                            # simulate the backpropagation procedure to next level
+                            for k in range(self._n_block):
+                                delta = res_block(delta, "res{}".format(k), chan, first=(k == 0))
                 # output
                 if self._pre_act:
                     delta = INReLU(delta, "actlast")
@@ -231,7 +235,7 @@ class SingleSynTex(SynTexModelDesc):
         with tf.variable_scope("syn"):
             for s in range(self._n_stage):
                 image_input, loss_overall_input, _, pre_image_output = \
-                    self.build_stage(pre_image_output, gram_target, name="stage%d" % s)
+                    self.build_stage(pre_image_output, gram_target, s+1, name="stage%d" % s)
                 self.image_outputs.append(image_input)
                 self.losses.append(tf.reduce_mean(loss_overall_input, name="loss%d" % s))
         self.collect_variables("syn")
@@ -241,6 +245,7 @@ class SingleSynTex(SynTexModelDesc):
             self._build_loss(image_output, gram_target, calc_grad=False)
         self.image_outputs.append(image_output)
         self.losses.append(tf.reduce_mean(loss_overall_output, name="loss_output"))
+        self.loss_layer_output = loss_layer_output
         self.loss_layer_output = OrderedDict()
         with tf.name_scope("loss_layer_output"):
             for layer in loss_layer_output:
@@ -264,11 +269,15 @@ class SingleSynTex(SynTexModelDesc):
 def get_data(datadir, size=IMAGESIZE, isTrain=True):
     if isTrain:
         augs = [
+            imgaug.ResizeShortestEdge(int(size*1.143)),
             imgaug.RandomCrop(size),
             imgaug.Flip(horiz=True),
         ]
     else:
-        augs = [imgaug.CenterCrop(size)]
+        augs = [
+            imgaug.ResizeShortestEdge(int(size*1.143)),
+            imgaug.CenterCrop(size)]
+
 
     def get_images(dir):
         files = sorted(glob.glob(os.path.join(dir, "*.jpg")))
@@ -298,13 +307,16 @@ class VisualizeTestSet(Callback):
     def _trigger(self):
         idx = 0
         for pii, it in self.val_ds:
+            print("------------------ predict --------------")
+            print(pii.shape, pii.dtype)
+            print(it.shape, it.dtype)
             viz = self.pred(pii, it)
             self.trainer.monitors.put_image('test-{}'.format(idx), viz)
             idx += 1
 
 
 if __name__ == "__main__":
-    ps = SingleSynTex.get_parser()
+    ps = ProgressiveSynTex.get_parser()
     ps.add("--data-folder", type=str, default="../images/single_12")
     ps.add("--save-folder", type=str, default="train_log/single_model")
     ps.add("--steps-per-epoch", type=int, default=1000)
@@ -338,7 +350,7 @@ if __name__ == "__main__":
     df = PrintData(df)
     data = QueueInput(df)
 
-    SynTexTrainer(data, SingleSynTex(args)).train_with_defaults(
+    SynTexTrainer(data, ProgressiveSynTex(args)).train_with_defaults(
         callbacks=[
             PeriodicTrigger(ModelSaver(), every_k_epochs=save_epoch),
             PeriodicTrigger(ModelSaver(), every_k_epochs=end_epoch), # save model at last

@@ -29,7 +29,7 @@ def build_texture_loss(a, b, coefs, is_gram_a=False, is_gram_b=True,
             gram_a = a
         else:
             gram_a = OrderedDict()
-            for k in a:
+            for k in coefs:
                 with tf.name_scope(k):
                     gram_a[k] = build_gram(a[k])
         
@@ -37,19 +37,19 @@ def build_texture_loss(a, b, coefs, is_gram_a=False, is_gram_b=True,
             gram_b = b
         else:
             gram_b = OrderedDict()
-            for k in b:
+            for k in coefs:
                 with tf.name_scope(k):
                     gram_b[k] = build_gram(b[k])
         
         loss_layer = OrderedDict()
-        for k in gram_a:
+        for k in coefs:
             gram_diff = gram_a[k] - gram_b[k]
             loss_layer[k] = tf.reduce_mean(tf.square(gram_diff),
                     axis=[1,2], name="l2_"+k)
         loss_overall = tf.add_n([coefs[k]*1./4 * loss_layer[k] for k in loss_layer], name="loss_overall")
     if calc_grad:
         grad_layer = OrderedDict()
-        for k in gram_a:
+        for k in coefs:
             # NOTE tf.gradients returns a list of grads w.r.t. inputs
             grad_layer[k] = tf.gradients(loss_layer[k], a[k])[0]
         return loss_overall, loss_layer, grad_layer

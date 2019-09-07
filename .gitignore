@@ -1,4 +1,5 @@
 # User specified
+images/
 .vscode/
 test/
 train_log/
