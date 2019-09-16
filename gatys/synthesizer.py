@@ -52,8 +52,10 @@ class Synthesizer(object):
         vgg19 = Vgg19Extractor(self.vgg19_path)
         self.shape_input = [1, self.image_size, self.image_size, 3]
         ph_input = tf.placeholder(tf.float32, shape=self.shape_input, name="inputs")
+        ph_is_preimage = tf.placeholder(tf.bool, shape=[], name="is_preimage")
+        image_input = tf.cond(ph_is_preimage, lambda: tf.sigmoid(ph_input), lambda: ph_input, name="image_input")
         #
-        feat_input = vgg19.build(ph_input, "ext_input")
+        feat_input = vgg19.build(image_input, "ext_input")
         gram_input = OrderedDict()
         for k in Synthesizer.DEFAULT_COEFS:
             gram_input[k] = build_gram(feat_input[k])
@@ -73,38 +75,41 @@ class Synthesizer(object):
             grad_input = tf.gradients(loss_overall, ph_input, name="grad_input")[0]
         #
         self.ph_input = ph_input
+        self.ph_is_preimage = ph_is_preimage
         self.gram_input = gram_input
         if not self.gram_only:
             self.op_update_gram_target = op_update_gram_target
             self.loss_overall = loss_overall
             self.grad_input = grad_input
 
-    def compute_gram(self, image, mask=None, update=False):
+    def compute_gram(self, image, mask=None, update=False, is_preimage=False):
         if len(image.shape) == 3:
             image = image[np.newaxis, ...]
         if update:
-            return self.sess.run(self.op_update_gram_target, feed_dict={self.ph_input: image})
+            return self.sess.run(self.op_update_gram_target,
+                feed_dict={self.ph_input: image, self.ph_is_preimage: is_preimage})
         else:
-            return self.sess.run(self.gram_input, feed_dict={self.ph_input: image})
+            return self.sess.run(self.gram_input,
+                feed_dict={self.ph_input: image, self.ph_is_preimage: is_preimage})
 
-    def step(self, image, mask=None, target_image=None):
+    def step(self, input, mask=None, target_image=None, is_preimage=False):
         """First call 'compute_gram' with 'update=True' to load target gram
         """
-        if len(image.shape) == 3:
-            image = image[np.newaxis, ...]
+        if len(input.shape) == 3:
+            input = input[np.newaxis, ...]
         fetch_dict = {"grad": self.grad_input, "func": self.loss_overall}
-        return self.sess.run(fetch_dict, {self.ph_input: image})
+        return self.sess.run(fetch_dict, {self.ph_input: input, self.ph_is_preimage: is_preimage})
 
-    def synthesize(self, image_init, image_target, mask_input=None, mask_target=None, bounds=None):
+    def synthesize(self, input_init, image_target, mask_input=None, mask_target=None, bounds=None, is_preimage=False):
         def f(x):
             x = x.reshape(self.shape_input)
-            ret = self.step(x)
+            ret = self.step(x, is_preimage=is_preimage)
             return [np.mean(ret["func"]), np.array(ret["grad"].ravel(), dtype=np.float64)]
         
-        if bounds is None:
+        if bounds is None and (not is_preimage):
             bounds = get_bounds(self.shape_input)
         self.compute_gram(image_target, update=True)
-        res = minimize(f, image_init, method="L-BFGS-B", jac=True,
+        res = minimize(f, input_init, method="L-BFGS-B", jac=True,
                 bounds=bounds, options=self.options)
         return res["x"].reshape(self.shape_input[1:]), res["fun"]
 
@@ -116,17 +121,28 @@ def test():
     from syntex.visualization import ImageDisplay, get_plottable_data
 
     ps = Synthesizer.get_parser()
+    ps.add("--image-path", type=str)
+    ps.add_flag("--preimage")
     args = ps.parse_args()
     #
-    image_target = imread("../images/flower_beds_256/FlowerBeds0008_256.jpg", pilmode="RGB") / 255.
-    image_init = np.random.uniform(1./255, 1. - 1./255, size=image_target.shape)
+    image_path = args.get("image_path", "../images/flower_beds_256/FlowerBeds0008_256.jpg")
+    image_target = imread(image_path, pilmode="RGB") / 255.
+    is_preimage = args.get("preimage", False)
+    if is_preimage:
+        input_init = np.random.uniform(-1., 1., size=image_target.shape)
+    else:
+        input_init = np.random.uniform(1./255, 1. - 1./255, size=image_target.shape)
     #
     start_time = time.time()
     config = tf.ConfigProto(log_device_placement=False, device_count={"GPU": 0})
     with tf.Session(config=config) as sess:
         syn = Synthesizer(args, sess)
         syn.build()
-        image_syn, fun = syn.synthesize(image_init, image_target)
+        output, fun = syn.synthesize(input_init, image_target, is_preimage=is_preimage)
+    if is_preimage:
+        image_syn = 1./(1.+np.exp(-output))
+    else:
+        image_syn = output
     print("Finished (%.2f sec)" % (time.time() - start_time))
     #
     imdp = ImageDisplay()
