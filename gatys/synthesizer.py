@@ -25,6 +25,7 @@ class Synthesizer(object):
         self.vgg19_path = args.get("vgg19_npy_path")
         self.image_size = args.get("image_size")
         self.gram_only = args.get("gram_only")
+        self.verbose = args.get("verbose")
         self.options = {
             "maxiter": args["maxiter"],
             "maxcor": args["maxcor"],
@@ -46,6 +47,7 @@ class Synthesizer(object):
         ps.add("--maxcor", type=int, default=20,
                 help="Max number of history gradients and points")
         ps.add_flag("--disp")
+        ps.add_flag("--verbose")
         return ps
 
     def build(self):
@@ -71,8 +73,19 @@ class Synthesizer(object):
                     op_update_gram_target.append(tf.assign(gram_target[k], gram_input[k]))
         #
         if not self.gram_only:
-            loss_overall, loss_layer, _ = build_texture_loss(feat_input, gram_target, Synthesizer.DEFAULT_COEFS)
+            loss_overall, loss_layer, grad_layer = build_texture_loss(feat_input, gram_target, Synthesizer.DEFAULT_COEFS,
+                calc_grad=self.verbose)
             grad_input = tf.gradients(loss_overall, ph_input, name="grad_input")[0]
+            if self.verbose:
+                # compute the mean absolute value of gradients from each layer
+                L1_act = OrderedDict()
+                L1_grad_layer = OrderedDict()
+                L1_grad_input = OrderedDict()
+                L1_grad_input["all"] = tf.reduce_mean(tf.abs(grad_input))
+                for k in Synthesizer.DEFAULT_COEFS:
+                    L1_act[k] = tf.reduce_mean(tf.abs(feat_input[k]))
+                    L1_grad_layer[k] = tf.reduce_mean(tf.abs(grad_layer[k]))
+                    L1_grad_input[k] = tf.reduce_mean(tf.abs(tf.gradients(loss_layer[k], ph_input)[0]))
         #
         self.ph_input = ph_input
         self.ph_is_preimage = ph_is_preimage
@@ -81,6 +94,14 @@ class Synthesizer(object):
             self.op_update_gram_target = op_update_gram_target
             self.loss_overall = loss_overall
             self.grad_input = grad_input
+        self.step_fetch_dict = {"grad": self.grad_input, "func": self.loss_overall}
+        if self.verbose:
+            self.step_fetch_dict["gi_all"] = L1_grad_input['all']
+            for k in Synthesizer.DEFAULT_COEFS:
+                self.step_fetch_dict["l_"+k] = loss_layer[k]
+                self.step_fetch_dict["a_"+k] = L1_act[k]
+                self.step_fetch_dict["gl_"+k] = L1_grad_layer[k]
+                self.step_fetch_dict["gi_"+k] = L1_grad_input[k]
 
     def compute_gram(self, image, mask=None, update=False, is_preimage=False):
         if len(image.shape) == 3:
@@ -97,13 +118,17 @@ class Synthesizer(object):
         """
         if len(input.shape) == 3:
             input = input[np.newaxis, ...]
-        fetch_dict = {"grad": self.grad_input, "func": self.loss_overall}
-        return self.sess.run(fetch_dict, {self.ph_input: input, self.ph_is_preimage: is_preimage})
+        #fetch_dict = {"grad": self.grad_input, "func": self.loss_overall}
+        return self.sess.run(self.step_fetch_dict, {self.ph_input: input, self.ph_is_preimage: is_preimage})
 
     def synthesize(self, input_init, image_target, mask_input=None, mask_target=None, bounds=None, is_preimage=False):
         def f(x):
             x = x.reshape(self.shape_input)
             ret = self.step(x, is_preimage=is_preimage)
+            if self.verbose:
+                for k in Synthesizer.DEFAULT_COEFS:
+                    print(k, ret["l_"+k], ret["a_"+k], ret["gl_"+k], ret["gi_"+k], end="|")
+                print("all", ret["gi_all"])
             return [np.mean(ret["func"]), np.array(ret["grad"].ravel(), dtype=np.float64)]
         
         if bounds is None and (not is_preimage):
@@ -121,11 +146,11 @@ def test():
     from syntex.visualization import ImageDisplay, get_plottable_data
 
     ps = Synthesizer.get_parser()
-    ps.add("--image-path", type=str)
+    ps.add("--image-path", type=str, default="../images/flower_beds_256/FlowerBeds0008_256.jpg")
     ps.add_flag("--preimage")
     args = ps.parse_args()
     #
-    image_path = args.get("image_path", "../images/flower_beds_256/FlowerBeds0008_256.jpg")
+    image_path = args.get("image_path")
     image_target = imread(image_path, pilmode="RGB") / 255.
     is_preimage = args.get("preimage", False)
     if is_preimage:
