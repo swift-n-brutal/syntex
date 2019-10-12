@@ -103,6 +103,8 @@ class Synthesizer(object):
                 self.step_fetch_dict["gl_"+k] = L1_grad_layer[k]
                 self.step_fetch_dict["gi_"+k] = L1_grad_input[k]
 
+
+
     def compute_gram(self, image, mask=None, update=False, is_preimage=False):
         if len(image.shape) == 3:
             image = image[np.newaxis, ...]
@@ -164,6 +166,8 @@ def test():
         syn = Synthesizer(args, sess)
         syn.build()
         output, fun = syn.synthesize(input_init, image_target, is_preimage=is_preimage)
+        writer = tf.summary.FileWriter('train_log', graph=sess.graph, session=sess)
+        #writer.add_graph(sess.graph)
     if is_preimage:
         image_syn = 1./(1.+np.exp(-output))
     else:

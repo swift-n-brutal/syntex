@@ -12,46 +12,42 @@ VGG_MEAN_RGB = list(reversed(VGG_MEAN))
 
 class Vgg19Extractor(Vgg19):
     def __init__(self, vgg19_npy_path=None, trainable=False,
-            is_rgb_weight=True, use_avg_pool=True, name="vgg19_extractor"):
+            is_rgb_input=True, use_avg_pool=True, name="vgg19_extractor"):
         if vgg19_npy_path is None:
             path = inspect.getfile(Vgg19Extractor)
             path = os.path.abspath(os.path.join(path, os.pardir))
-            if is_rgb_weight:
-                vgg19_npy_path = os.path.join(path, "vgg19_normalised_rgb.npz")
-            else:
-                vgg19_npy_path = os.path.join(path, "vgg_normalised.npz")
+            vgg19_npy_path = os.path.join(path, "vgg19_normalised_rgb.npz")
             
         Vgg19.__init__(self, vgg19_npy_path, trainable)
-        self.is_rgb_weight = is_rgb_weight
+        if is_rgb_input:
+            w_conv1_1 = self.data_dict['conv1_1'][0]
+            assert w_conv1_1.shape == (3, 3, 3, 64)
+            #self.data_dict['conv1_1'][0] = w_conv1_1[:,:,::-1,:]
+        self.is_rgb_input = is_rgb_input
         self.use_avg_pool = use_avg_pool
         self.name = name
         print("npy file loaded from", vgg19_npy_path)
 
-    def build(self, rgb, name="vgg19"):
+    def build(self, input_image, name="vgg19"):
         """Load variable from npy to build the VGG19 feature extractor
 
         Parameters
         ----------
-        rgb : tf.Tensor
-            rgb image [batch, height, width, 3] values scaled [0, 1]
+        input_image : tf.Tensor
+            input image [batch, height, width, 3] values scaled [0, 1]
         """
 
         start_time = time.time()
         print("build VGG19 model started")
 
         with tf.name_scope(name):
-            rgb_scaled = rgb * 255.0
+            input_image_scaled = input_image * 255.0
 
-            if self.is_rgb_weight:
-                input_image = rgb_scaled - VGG_MEAN_RGB
+            if self.is_rgb_input:
+                input_image = input_image_scaled - VGG_MEAN_RGB
             else:
-                # Convert RGB to BGR
-                red, green, blue = tf.split(axis=3, num_or_size_splits=3, value=rgb_scaled)
-                input_image = tf.concat(axis=3, values=[
-                    blue - VGG_MEAN[0],
-                    green - VGG_MEAN[1],
-                    red - VGG_MEAN[2]
-                ])
+                input_image = input_image_scaled - VGG_MEAN
+            
             if self.use_avg_pool:
                 pool = self.avg_pool
             else:

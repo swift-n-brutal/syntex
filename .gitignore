@@ -4,6 +4,8 @@ images/
 test/
 train_log/
 *.npz
+*.caffemodel
+*.backup
 
 
 # Byte-compiled / optimized / DLL files
