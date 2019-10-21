@@ -8,7 +8,7 @@ from tensorpack import (InstanceNorm, LinearWrap, Conv2D, Conv2DTranspose,
     ScheduledHyperParamSetter, PeriodicTrigger, SaverRestore, JoinData,
     AugmentImageComponent, ImageFromFile, BatchData, MultiProcessRunner,
     MergeAllSummaries)
-from tensorpack.tfutils.summary import add_moving_summary
+from tensorpack.tfutils.summary import add_moving_summary, add_tensor_summary
 
 from aparse import ArgParser
 from syntex.texture_utils import build_texture_loss
@@ -33,11 +33,12 @@ class ProgressiveSynTex(SynTexModelDesc):
     def __init__(self, args):
         super(ProgressiveSynTex, self).__init__(args)
         self._image_size = args.get("image_size", IMAGESIZE)
-        self._lr = args.get("lr", LR)
+        # The loss is averaged among gpus. So we need to scale the lr accordingly.
+        self._lr = args.get("lr", LR) * max(args.get("n_gpu"), 1)
         self._beta1 = args.get("beta1", BETA1)
         self._beta2 = args.get("beta2", BETA2)
-        #self._n_stage = args.get("n_stage", 1)
-        self._n_stage = 5
+        self._n_stage = args.get("n_stage", 5)
+        assert self._n_stage == 5, "Num of stages is 5 for progressive model"
         self._n_block = args.get("n_block", 2)
         act = args.get("act", "sigmoid")
         if act == "sigmoid":
@@ -48,7 +49,7 @@ class ProgressiveSynTex(SynTexModelDesc):
             self._act = tf.identity
         else:
             raise ValueError("Invalid activation: " + str(type(act)))
-        self._loss_scale = args.get("loss_scale", 0.)
+        self._loss_scale = args.get("loss_scale", 1.)
         self._pre_act = args.get("pre_act", False)
         self._nn_upsample = not args.get("deconv_upsample", False)
 
@@ -70,6 +71,7 @@ class ProgressiveSynTex(SynTexModelDesc):
         ps.add("--loss-scale", type=float, default=1.)
         ps.add_flag("--pre-act")
         ps.add_flag("--deconv-upsample")
+        ps.add("--n-gpu", type=int, default=1)
         return ps
 
     @staticmethod
@@ -171,8 +173,10 @@ class ProgressiveSynTex(SynTexModelDesc):
                         chan = grad.get_shape().as_list()[-1]
                         with tf.variable_scope(layer):
                             # compute pseudo grad of current layer
-                            grad = Conv2D("grad_conv1", grad, chan, 3)
-                            grad = Conv2D("grad_conv2", grad, chan, 3, activation=tf.identity)
+                            grad = tf.pad(grad, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="SYMMETRIC")
+                            grad = Conv2D("grad_conv1", grad, chan, 3, padding="VALID")
+                            grad = tf.pad(grad, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="SYMMETRIC")
+                            grad = Conv2D("grad_conv2", grad, chan, 3, padding="VALID", activation=tf.identity)
                             # merge with grad from deeper layers
                             if first:
                                 delta = tf.identity(grad, name="grad_merged")
@@ -262,8 +266,9 @@ class ProgressiveSynTex(SynTexModelDesc):
         add_moving_summary(self.loss, *self.losses, *self.loss_layer_output.values())
 
     def optimizer(self):
-        lr = tf.get_variable("learning_rate", initializer=self._lr, trainable=False)
-        return tf.train.AdamOptimizer(lr, beta1=self._beta1, beta2=self._beta2, epsilon=1e-3)
+        lr_var = tf.get_variable("learning_rate", initializer=self._lr, trainable=False)
+        add_tensor_summary(lr_var, ['scalar'], main_tower_only=True)
+        return tf.train.AdamOptimizer(lr_var, beta1=self._beta1, beta2=self._beta2, epsilon=1e-3)
 
 
 def get_data(datadir, size=IMAGESIZE, isTrain=True):
@@ -319,7 +324,7 @@ if __name__ == "__main__":
     ps = ProgressiveSynTex.get_parser()
     ps.add("--data-folder", type=str, default="../images/single_12")
     ps.add("--save-folder", type=str, default="train_log/single_model")
-    ps.add("--steps-per-epoch", type=int, default=1000)
+    ps.add("--steps-per-epoch", type=int, default=4000)
     ps.add("--max-epoch", type=int, default=200)
     ps.add("--save-epoch", type=int, default=20)
     ps.add("--image-steps", type=int, default=100)
@@ -328,17 +333,20 @@ if __name__ == "__main__":
     ps.print_args()
     print()
 
-    data_folder = args.get("data_folder", "../images/single_12")
-    save_folder = args.get("save_folder", "train_log/single_model")
+    data_folder = args.get("data_folder")
+    save_folder = args.get("save_folder")
     image_size = args.get("image_size", IMAGESIZE)
-    steps_per_epoch = args.get("steps_per_epoch", 1000)
     max_epoch = args.get("max_epoch", 200)
     save_epoch = args.get("save_epoch", max_epoch // 10)
     image_steps = args.get("image_steps", 100)
-    lr = args.get("lr", LR)
+    # Scale lr and steps_per_epoch accordingly.
+    # Make sure the total number of gradient evaluations is consistent.
+    n_gpu = args.get("n_gpu", 1)
+    lr = args.get("lr", LR) * max(n_gpu, 1)
+    steps_per_epoch = args.get("steps_per_epoch", 1000) / max(n_gpu, 1)
     # lr starts decreasing at half of max epoch
     start_dec_epoch = max_epoch // 2
-    # stop when lr is 0.01 of its initial value
+    # stops when lr is 0.01 of its initial value
     end_epoch = max_epoch - int((max_epoch - start_dec_epoch) * 0.01)
 
     if save_folder == None:
@@ -350,7 +358,7 @@ if __name__ == "__main__":
     df = PrintData(df)
     data = QueueInput(df)
 
-    SynTexTrainer(data, ProgressiveSynTex(args)).train_with_defaults(
+    SynTexTrainer(data, ProgressiveSynTex(args), n_gpu).train_with_defaults(
         callbacks=[
             PeriodicTrigger(ModelSaver(), every_k_epochs=save_epoch),
             PeriodicTrigger(ModelSaver(), every_k_epochs=end_epoch), # save model at last
