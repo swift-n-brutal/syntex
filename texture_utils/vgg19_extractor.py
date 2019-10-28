@@ -19,6 +19,16 @@ class Vgg19Extractor(Vgg19):
             vgg19_npy_path = os.path.join(path, "vgg19_normalised_rgb.npz")
             
         Vgg19.__init__(self, vgg19_npy_path, trainable)
+        # load parameters
+        data_dict = dict()
+        weighted_layers = ["conv1_1", "conv1_2", "conv2_1", "conv2_2",
+                "conv3_1", "conv3_2", "conv3_3", "conv3_4",
+                "conv4_1", "conv4_2", "conv4_3", "conv4_4"]
+        for layer in weighted_layers:
+            data_dict[layer] = self.data_dict[layer]
+        # Explicitly close the NpzFile object to avoid leaking file descriptors
+        self.data_dict.close()
+        self.data_dict = data_dict
         if is_rgb_input:
             w_conv1_1 = self.data_dict['conv1_1'][0]
             assert w_conv1_1.shape == (3, 3, 3, 64)
@@ -28,7 +38,7 @@ class Vgg19Extractor(Vgg19):
         self.name = name
         print("npy file loaded from", vgg19_npy_path)
 
-    def build(self, input_image, name="vgg19"):
+    def build(self, input_image, topmost=None, name="vgg19"):
         """Load variable from npy to build the VGG19 feature extractor
 
         Parameters
@@ -54,18 +64,32 @@ class Vgg19Extractor(Vgg19):
                 pool = self.max_pool
 
             self.conv1_1 = self.conv_layer(input_image, 3, 64, "conv1_1")
+            if topmost == "conv1_1":
+                return OrderedDict([("conv1_1", self.conv1_1)])
             self.conv1_2 = self.conv_layer(self.conv1_1, 64, 64, "conv1_2")
             self.pool1 = pool(self.conv1_2, "pool1")
+            if topmost == "pool1":
+                return OrderedDict([("conv1_1", self.conv1_1),
+                    ("pool1", self.pool1)])
 
             self.conv2_1 = self.conv_layer(self.pool1, 64, 128, "conv2_1")
             self.conv2_2 = self.conv_layer(self.conv2_1, 128, 128, "conv2_2")
             self.pool2 = pool(self.conv2_2, "pool2")
+            if topmost == "pool2":
+                return OrderedDict([("conv1_1", self.conv1_1),
+                    ("pool1", self.pool1),
+                    ("pool2", self.pool2)])
 
             self.conv3_1 = self.conv_layer(self.pool2, 128, 256, "conv3_1")
             self.conv3_2 = self.conv_layer(self.conv3_1, 256, 256, "conv3_2")
             self.conv3_3 = self.conv_layer(self.conv3_2, 256, 256, "conv3_3")
             self.conv3_4 = self.conv_layer(self.conv3_3, 256, 256, "conv3_4")
             self.pool3 = pool(self.conv3_4, "pool3")
+            if topmost == "pool3":
+                return OrderedDict([("conv1_1", self.conv1_1),
+                    ("pool1", self.pool1),
+                    ("pool2", self.pool2),
+                    ("pool3", self.pool3)])
 
             self.conv4_1 = self.conv_layer(self.pool3, 256, 512, "conv4_1")
             self.conv4_2 = self.conv_layer(self.conv4_1, 512, 512, "conv4_2")
@@ -73,10 +97,9 @@ class Vgg19Extractor(Vgg19):
             self.conv4_4 = self.conv_layer(self.conv4_3, 512, 512, "conv4_4")
             self.pool4 = pool(self.conv4_4, "pool4")
 
+            # NOTE Load all parameters in __init__
             # Explicitly close the NpzFile object to avoid leaking file descriptors
-            self.data_dict.close()
-            #self.output_names = ["conv1_1", "pool1", "pool2", "pool3", "pool4"]
-            #self.outputs = [self.conv1_1, self.pool1, self.pool2, self.pool3, self.pool4]
+            #self.data_dict.close()
         print(("build model finished: %ds" % (time.time() - start_time)))
         return OrderedDict([
             ("conv1_1", self.conv1_1),
