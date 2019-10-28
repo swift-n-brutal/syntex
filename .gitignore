@@ -3,6 +3,7 @@ images/
 .vscode/
 test/
 train_log/
+old_log/
 *.npz
 *.caffemodel
 *.backup
