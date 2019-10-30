@@ -36,6 +36,7 @@ class ImageDisplay(object):
         self.px_h_img = 0
         self.px_w_img = 0
         self.images = list()
+        self.fig, self.axes = None, None
 
     def add_image(self, image, title=None):
         self.images.append((image, title))
@@ -53,7 +54,7 @@ class ImageDisplay(object):
         else:
             raise NotImplementedError
 
-    def show(self):
+    def show(self, fig_id):
         if self.n_cols is None:
             n_cols = len(self.images)
             n_rows = 1
@@ -64,7 +65,7 @@ class ImageDisplay(object):
         px_h_fig = (px_h_title + self.px_margin + self.px_h_img) * n_rows + self.px_margin
         px_w_fig = (self.px_margin + self.px_w_img) * n_cols + self.px_margin
         px2sz = 1./self.dpi
-        fig = plt.figure(figsize=(px_w_fig*px2sz, px_h_fig*px2sz), dpi=self.dpi)
+        fig = plt.figure(fig_id, figsize=(px_w_fig*px2sz, px_h_fig*px2sz), dpi=self.dpi)
         # add image axes
         axes = list()
         bottom = 1.
@@ -83,13 +84,24 @@ class ImageDisplay(object):
         fig.show()
         return fig, axes
 
-    def show_images(self, images, wait=True):
+    def show_images(self, images, wait=True, fig_id=1):
         for image, title in images:
             self.add_image(image, title)
-        fig, axes = self.show()
+        self.fig, self.axes = self.show(fig_id)
         if wait:
             plt.waitforbuttonpress()
-        return fig, axes
+        return self.fig, self.axes
 
+    def savefig(self, save_path):
+        if self.fig is not None:
+            self.fig.savefig(save_path)
+        else:
+            print("No figure")
 
-            
+    def clear(self):
+        if self.axes is not None:
+            for ax in self.axes:
+                ax.remove()
+        self.images.clear()
+
+        
