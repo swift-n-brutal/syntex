@@ -429,6 +429,7 @@ if __name__ == "__main__":
     ps.add("--max-epoch", type=int, default=MAX_EPOCH)
     ps.add("--save-epoch", type=int, help="Save parameters every n epochs")
     ps.add("--image-steps", type=int, help="Synthesize images every n steps")
+    ps.add("--scalar-steps", type=int, help="Period to add scalar summary", default=0)
     ps.add("--batch-size", type=int)
     args = ps.parse_args()
     print("Arguments")
@@ -450,7 +451,11 @@ if __name__ == "__main__":
     steps_per_epoch = args.get("steps_per_epoch") or 1000
     steps_per_epoch /= equi_batch_size
     image_steps = args.get("image_steps") or steps_per_epoch // 10
-    scalar_steps = max(10 // equi_batch_size, 1)
+    scalar_steps = args.get("scalar_steps")
+    if scalar_steps > 0:
+        scalar_steps = max(scalar_steps // equi_batch_size, 1)
+    else:
+        scalar_steps = 0 # merge scalar summary every epoch
     # lr starts decreasing at half of max epoch
     start_dec_epoch = max_epoch // 2
     # stops when lr is 0.01 of its initial value
