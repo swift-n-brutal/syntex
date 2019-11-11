@@ -19,7 +19,7 @@ STEPS_PER_EPOCH = 4000
 #
 IMAGESIZE = 224
 LR = 5e-5
-BETA1 = 0.9
+BETA1 = 0.5
 BETA2 = 0.999
 BATCH = 1
 TEST_BATCH = 1
@@ -104,7 +104,7 @@ class ProgressiveSynTex(SynTexModelDesc):
         ps.add("--beta2", type=float, default=BETA2)
         ps.add("--n-stage", type=int, default=5, help="This argument is fixed to 5.")
         ps.add("--n-block", type=int, default=2, help="number of res blocks in each scale.")
-        ps.add("--act", type=str, default="sigmoid", choices=["sigmoid", "tanh", "identity"])
+        ps.add("--act", type=str, default="sigmoid", choices=["sigmoid", "identity"])
         ps.add("--loss-scale", type=float, default=1.)
         ps.add("--pad-type", type=str, default="reflect", choices=["reflect", "zero", "symmetric"])
         ps.add("--grad-ksize", type=int, default=3)
@@ -372,7 +372,7 @@ class ProgressiveSynTex(SynTexModelDesc):
         return tf.train.AdamOptimizer(lr_var, beta1=self._beta1, beta2=self._beta2, epsilon=1e-3)
 
 
-def get_data(datadir, size=IMAGESIZE, isTrain=True):
+def get_data(datadir, size=IMAGESIZE, isTrain=True, zmin=-1, zmax=1):
     if isTrain:
         augs = [
             imgaug.ResizeShortestEdge(int(size*1.143)),
@@ -388,7 +388,7 @@ def get_data(datadir, size=IMAGESIZE, isTrain=True):
     def get_images(dir):
         files = sorted(glob.glob(os.path.join(dir, "*.jpg")))
         df = ImageFromFile(files, channel=3, shuffle=isTrain)
-        random_df = RandomZData([size, size, 3], -1, 1)
+        random_df = RandomZData([size, size, 3], zmin, zmax)
         return JoinData([random_df, AugmentImageComponent(df, augs)])
     
     names = ['train']  if isTrain else ['test']
@@ -460,13 +460,15 @@ if __name__ == "__main__":
     start_dec_epoch = max_epoch // 2
     # stops when lr is 0.01 of its initial value
     end_epoch = max_epoch - int((max_epoch - start_dec_epoch) * 0.01)
+    # adjust noise input range according to the input act
+    zmin, zmax = (0, 1) if args.get("act") == "identity" else (-1, 1)
 
     if save_folder == None:
         logger.auto_set_dir()
     else:
         logger.set_logger_dir(save_folder)
 
-    df = get_data(data_folder, image_size)
+    df = get_data(data_folder, image_size, zmin=zmin, zmax=zmax)
     df = PrintData(df)
     data = QueueInput(df)
 
