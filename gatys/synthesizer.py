@@ -201,13 +201,15 @@ def test():
     ps.add("--image-folder", type=str, default="../images/scaly/train")
     ps.add("--save-folder", type=str, default="train_log")
     ps.add_flag("--batch-test")
+    ps.add("--batch-test-start", type=int, default=0)
+    ps.add("--batch-test-end", type=int, default=None)
     ps.add_flag("--preimage")
     args = ps.parse_args()
     #
     is_preimage = args.get("preimage", False)
     image_size = args.get("image_size")
     batch_test = args.get("batch_test")
-    NUM_PARALLEL_EXEC_UNITS = 8
+    NUM_PARALLEL_EXEC_UNITS = 2
     config = tf.ConfigProto(log_device_placement=False,
         intra_op_parallelism_threads=2,
         inter_op_parallelism_threads=2,
@@ -228,10 +230,12 @@ def test():
             image_folder = args.get("image_folder")
             image_names = get_image_file_names(image_folder)
             save_folder = args.get("save_folder")
+            batch_test_start = args.get("batch_test_start")
+            batch_test_end = args.get("batch_test_end")
             if not os.path.exists(save_folder):
                 os.makedirs(save_folder)
             imdp = ImageDisplay()
-            for name in image_names:
+            for name in list(image_names)[batch_test_start:batch_test_end]:
                 image_path = os.path.join(image_folder, name)
                 image_target = imread(image_path, pilmode="RGB") / 255.
                 image_target = resize_crop(image_target, image_size)
