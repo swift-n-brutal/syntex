@@ -7,7 +7,7 @@ from tensorpack import (InstanceNorm, LinearWrap, Conv2D, Conv2DTranspose,
     argscope, imgaug, logger, PrintData, QueueInput, ModelSaver, Callback,
     ScheduledHyperParamSetter, PeriodicTrigger, SaverRestore, JoinData,
     AugmentImageComponent, ImageFromFile, BatchData, MultiProcessRunner,
-    MergeAllSummaries, BatchNorm)
+    MergeAllSummaries, BatchNorm, PredictConfig, OfflinePredictor, SmartInit)
 from tensorpack.tfutils.summary import add_moving_summary, add_tensor_summary
 
 from aparse import ArgParser
@@ -345,11 +345,15 @@ class ProgressiveSynTex(SynTexModelDesc):
         self.losses = list()
         pre_image_output = pre_image_input
         with tf.variable_scope("syn"):
-            for s in range(self._n_stage):
-                image_input, loss_overall_input, _, pre_image_output = \
-                    self.build_stage(pre_image_output, gram_target, s+1, name="stage%d" % s)
-                self.image_outputs.append(image_input)
-                self.losses.append(tf.reduce_mean(loss_overall_input, name="loss%d" % s))
+            # TODO Due to the mistake of design, the batch size is always 1.
+            # Thus, batchnorm has not difference with instancenorm. We need
+            # to set training=True for all phases.
+            with argscope(BatchNorm, training=True):
+                for s in range(self._n_stage):
+                    image_input, loss_overall_input, _, pre_image_output = \
+                        self.build_stage(pre_image_output, gram_target, s+1, name="stage%d" % s)
+                    self.image_outputs.append(image_input)
+                    self.losses.append(tf.reduce_mean(loss_overall_input, name="loss%d" % s))
         self.collect_variables("syn")
         #
         image_output = self._act(pre_image_output, name="output")
@@ -427,22 +431,47 @@ class VisualizeTestSet(Callback):
             self.trainer.monitors.put_image('test-{}'.format(idx), viz)
             idx += 1
 
+def get_test_batch(batch_size, train_ds, test_data):
+    # Insert the test data into a batch of train data.
+    train_ds.reset_state()
+    train_data = next(iter(train_ds))
+    assert train_data[0].shape[0] == batch_size, "{}".format(train_data[0].shape[0])
+    for i, data in enumerate(train_data):
+        data[i][0, ...] = test_data[i][0, ...]
+    return train_data
 
-if __name__ == "__main__":
-    ps = ProgressiveSynTex.get_parser()
-    ps.add("--data-folder", type=str, default="../images/scaly")
-    ps.add("--save-folder", type=str, default="train_log/impr")
-    ps.add("--steps-per-epoch", type=int, default=STEPS_PER_EPOCH)
-    ps.add("--max-epoch", type=int, default=MAX_EPOCH)
-    ps.add("--save-epoch", type=int, help="Save parameters every n epochs")
-    ps.add("--image-steps", type=int, help="Synthesize images every n steps")
-    ps.add("--scalar-steps", type=int, help="Period to add scalar summary", default=0)
-    ps.add("--batch-size", type=int)
-    args = ps.parse_args()
-    print("Arguments")
-    ps.print_args()
-    print()
+def test_only(args):
+    from imageio import imsave
+    data_folder = args.get("data_folder")
+    test_ckpt = args.get("test_ckpt")
+    test_folder = args.get("test_folder")
+    if not os.path.exists(test_folder):
+        os.makedirs(test_folder)
+    image_size = 224
+    pred_config = PredictConfig(
+        model=ProgressiveSynTex(args),
+        session_init=SmartInit(test_ckpt),
+        input_names=["pre_image_input", "image_target"],
+        output_names=['stages-target/viz', 'loss_output']
+    )
+    predictor = OfflinePredictor(pred_config)
+    test_ds = get_data(data_folder, image_size, isTrain=False)
+    test_ds.reset_state()
+    idx = 0
+    print("------------------ predict --------------")
+    for pii, it in test_ds:
+        output_array, loss_output = predictor(pii, it)
+        if output_array.ndim == 4:
+            for i in range(output_array.shape[0]):
+                imsave(os.path.join(test_folder, "test-{}.jpg".format(idx)), output_array[i])
+                idx += 1
+        else:
+            imsave(os.path.join(test_folder, "test-{}.jpg".format(idx)), output_array[i])
+            idx += 1
+        print("loss #", idx, "=", loss_output)
+    print("Test and save", idx, "images to", test_folder)
 
+def train(args):    
     data_folder = args.get("data_folder")
     save_folder = args.get("save_folder")
     image_size = args.get("image_size")
@@ -494,3 +523,26 @@ if __name__ == "__main__":
         steps_per_epoch=steps_per_epoch,
         session_init=None
     )
+
+if __name__ == "__main__":
+    ps = ProgressiveSynTex.get_parser()
+    ps.add("--data-folder", type=str, default="../images/scaly")
+    ps.add("--save-folder", type=str, default="train_log/impr")
+    ps.add("--steps-per-epoch", type=int, default=STEPS_PER_EPOCH)
+    ps.add("--max-epoch", type=int, default=MAX_EPOCH)
+    ps.add("--save-epoch", type=int, help="Save parameters every n epochs")
+    ps.add("--image-steps", type=int, help="Synthesize images every n steps")
+    ps.add("--scalar-steps", type=int, help="Period to add scalar summary", default=0)
+    ps.add("--batch-size", type=int)
+    ps.add_flag("--test-only")
+    ps.add("--test-folder", type=str, default="test_log")
+    ps.add("--test-ckpt", type=str)
+    args = ps.parse_args()
+    print("Arguments")
+    ps.print_args()
+    print()
+
+    if args.get("test_only"):
+        test_only(args)
+    else:
+        train(args)
