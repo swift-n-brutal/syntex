@@ -89,6 +89,7 @@ class ProgressiveSynTex(SynTexModelDesc):
         self._norm_type = args.get("norm_type") or "instance"
         self._act_type = args.get("act_type") or "relu"
         self._grad_ksize = args.get("grad_ksize") or 3
+        self._stop_grad = args.get("stop_grad") or False
 
     def inputs(self):
         return [tf.TensorSpec((None, self._image_size, self._image_size, 3), tf.float32, 'pre_image_input'),
@@ -112,6 +113,7 @@ class ProgressiveSynTex(SynTexModelDesc):
         ps.add("--act-type", type=str, default="relu", choices=["relu", "lrelu"])
         ps.add_flag("--pre-act")
         ps.add_flag("--deconv-upsample")
+        ps.add_flag("--stop-grad")
         ps.add("--n-gpu", type=int, default=1)
         return ps
 
@@ -220,6 +222,8 @@ class ProgressiveSynTex(SynTexModelDesc):
                 loss_input = 0.
             loss_grad = loss_input + coefs[layers[-1]]*1./4 * loss_per_layer[layers[-1]]
             grads = tf.gradients(loss_grad, [feat_input[k] for k in layers])
+            if self._stop_grad:
+                grads = [tf.stop_gradient(_g) for _g in grads]
             grad_per_layer = OrderedDict(zip(layers, grads))
         return feat_input, loss_input, loss_per_layer, grad_per_layer
 
@@ -303,7 +307,10 @@ class ProgressiveSynTex(SynTexModelDesc):
                 else:
                     delta = act(delta, "actlast")
                 delta_input = PadConv2D(delta, 3, 3, self._pad_type, tf.identity, True, "convlast")
-            pre_image_output = tf.add(pre_image_input, delta_input, name="pre_image_output")
+            if self._stop_grad:
+                pre_image_output = tf.add(tf.stop_gradient(pre_image_input), delta_input, name="pre_image_output")
+            else:
+                pre_image_output = tf.add(pre_image_input, delta_input, name="pre_image_output")
         return image_input, loss_input, loss_per_layer, pre_image_output
 
     def build_graph(self, pre_image_input, image_target):
