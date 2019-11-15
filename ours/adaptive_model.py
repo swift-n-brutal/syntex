@@ -7,16 +7,19 @@ from tensorpack import (InstanceNorm, LinearWrap, Conv2D, Conv2DTranspose,
     argscope, imgaug, logger, PrintData, QueueInput, ModelSaver, Callback,
     ScheduledHyperParamSetter, PeriodicTrigger, SaverRestore, JoinData,
     AugmentImageComponent, ImageFromFile, BatchData, MultiProcessRunner,
-    MergeAllSummaries)
-from tensorpack.tfutils.summary import add_moving_summary
+    MergeAllSummaries, BatchNorm)
+from tensorpack.tfutils.summary import add_moving_summary, add_tensor_summary
 
 from aparse import ArgParser
-from syntex.texture_utils import build_texture_loss
+from syntex.texture_utils import build_texture_loss, build_gram
 from model import SynTexModelDesc, SynTexTrainer, RandomZData
 
+MAX_EPOCH = 200
+STEPS_PER_EPOCH = 4000
+#
 IMAGESIZE = 224
 LR = 5e-5
-BETA1 = 0.9
+BETA1 = 0.5
 BETA2 = 0.999
 BATCH = 1
 TEST_BATCH = 1
@@ -29,15 +32,42 @@ def INLReLU(x, name=None):
     x = InstanceNorm('inorm', x)
     return tf.nn.leaky_relu(x, alpha=0.2, name=name)
 
+def BNReLU(x, name=None):
+    x = BatchNorm('bnorm', x)
+    return tf.nn.relu(x, name=name)
+
+def BNLReLU(x, name=None):
+    x = BatchNorm('bnorm', x)
+    return tf.nn.leaky_relu(x, alpha=0.2, name=name)
+
+def NONReLU(x, name=None):
+    return tf.nn.relu(x, name=name)
+
+def NONLReLU(x, name=None):
+    return tf.nn.leaky_relu(x, alpha=0.2, name=name)
+
+def PadConv2D(x, chan, ksize, pad_type, activation, use_bias, name=None):
+    psize = ksize - 1
+    p_start = psize // 2
+    p_end = psize - p_start
+    if psize > 0:
+        x = tf.pad(x, [[0,0], [p_start, p_end], [p_start, p_end], [0,0]], mode=pad_type)
+    return Conv2D(name, x, chan, ksize, padding="VALID", activation=activation, use_bias=use_bias)
+
 class AdaptiveSynTex(SynTexModelDesc):
     def __init__(self, args):
         super(AdaptiveSynTex, self).__init__(args)
-        self._image_size = args.get("image_size", IMAGESIZE)
-        self._lr = args.get("lr", LR)
-        self._beta1 = args.get("beta1", BETA1)
-        self._beta2 = args.get("beta2", BETA2)
-        self._n_stage = args.get("n_stage", 1)
-        self._n_block = args.get("n_block", 2)
+        self._image_size = args.get("image_size") or IMAGESIZE
+        # The loss is averaged among gpus. So we need to scale the lr accordingly.
+        n_gpu = args.get("n_gpu") or 1
+        batch_size = (args.get("batch_size") or BATCH)
+        equi_batch_size = max(n_gpu, 1) * batch_size
+        lr = args.get("lr") or LR
+        self._lr = lr * equi_batch_size
+        self._beta1 = args.get("beta1") or BETA1
+        self._beta2 = args.get("beta2") or BETA2
+        self._n_stage = args.get("n_stage") or 1
+        self._n_block = args.get("n_block") or 2
         act = args.get("act", "sigmoid")
         if act == "sigmoid":
             self._act = tf.nn.sigmoid
@@ -47,9 +77,18 @@ class AdaptiveSynTex(SynTexModelDesc):
             self._act = tf.identity
         else:
             raise ValueError("Invalid activation: " + str(type(act)))
-        self._loss_scale = args.get("loss_scale", 0.)
-        self._pre_act = args.get("pre_act", False)
-        self._nn_upsample = not args.get("deconv_upsample", False)
+        self._loss_scale = args.get("loss_scale", 1.)
+        self._pre_act = args.get("pre_act") or False
+        self._nn_upsample = not (args.get("deconv_upsample") or False)
+        pad_type = args.get("pad_type") or "reflect"
+        if pad_type == "zero":
+            self._pad_type = "CONSTANT"
+        else:
+            self._pad_type = pad_type.upper()
+        self._norm_type = args.get("norm_type") or "instance"
+        self._act_type = args.get("act_type") or "relu"
+        self._grad_ksize = args.get("grad_ksize") or 3
+        self._stop_grad = args.get("stop_grad") or False
 
     def inputs(self):
         return [tf.TensorSpec((None, self._image_size, self._image_size, 3), tf.float32, 'pre_image_input'),
@@ -58,80 +97,103 @@ class AdaptiveSynTex(SynTexModelDesc):
     @staticmethod
     def get_parser(ps=None):
         ps = SynTexModelDesc.get_parser(ps)
-        ps = ArgParser(ps, name="adaptive")
+        ps = ArgParser(ps, name="progressive")
         ps.add("--image-size", type=int, default=IMAGESIZE)
         ps.add("--lr", type=float, default=LR)
         ps.add("--beta1", type=float, default=BETA1)
         ps.add("--beta2", type=float, default=BETA2)
-        ps.add("--n-stage", type=int, default=1)
+        ps.add("--n-stage", type=int, default=1, help="number of unfolding")
         ps.add("--n-block", type=int, default=2, help="number of res blocks in each scale.")
-        ps.add("--act", type=str, default="sigmoid", choices=["sigmoid", "tanh", "identity"])
-        ps.add("--loss-scale", type=float, default=0.)
+        ps.add("--act", type=str, default="sigmoid", choices=["sigmoid", "identity"])
+        ps.add("--loss-scale", type=float, default=1.)
+        ps.add("--pad-type", type=str, default="reflect", choices=["reflect", "zero", "symmetric"])
+        ps.add("--grad-ksize", type=int, default=3)
+        ps.add("--norm-type", type=str, default="instance", choices=["instance", "batch", "none"])
+        ps.add("--act-type", type=str, default="relu", choices=["relu", "lrelu"])
         ps.add_flag("--pre-act")
         ps.add_flag("--deconv-upsample")
+        ps.add_flag("--stop-grad")
+        ps.add("--n-gpu", type=int, default=1)
         return ps
 
     @staticmethod
-    def build_res_block(x, name, chan, first=False):
-        """The value of input is considered to be computed after normalization
-        but before non-linearity. So the activation function is needed to be
-        applied in the residual branch.
+    def build_res_block(x, name, chan, pad_type, norm_type, act_type, first=False):
+        """The value of input should be after normalization but before non-linearity.
+        So the non-linearity function is needed to be applied in the residual branch.
 
         This implementation assumes that the input and output dimensions are
-        consistent. The upsampling and downsampling are implemented in other
-        modules such as Conv2D_Transpose and Conv2d, or resize_nearest_neighbor
-        and avg_pool.
+        consistent. The upsampling and downsampling steps are implemented in other
+        modules such as Conv2D_Transpose and Conv2d, or tile and avg_pool.
         """
         with tf.variable_scope(name):
             assert x.get_shape().as_list()[-1] == chan
             shortcut = x
-            res_input = tf.nn.relu(x, "act_input")
-            return (LinearWrap(res_input)
-                .tf.pad([[0, 0], [1, 1], [1, 1], [0, 0]], mode="SYMMETRIC")
+            if act_type == "relu": 
+                res_input = tf.nn.relu(x, "act_input")
+            else:
+                res_input = tf.nn.leaky_relu(x, alpha=0.2, name="act_input")
+            conv_branch = (LinearWrap(res_input)
+                .tf.pad([[0, 0], [1, 1], [1, 1], [0, 0]], mode=pad_type)
                 .Conv2D('conv0', chan, 3, padding="VALID")
-                .tf.pad([[0, 0], [1, 1], [1, 1], [0, 0]], mode="SYMMETRIC")
+                .tf.pad([[0, 0], [1, 1], [1, 1], [0, 0]], mode=pad_type)
                 .Conv2D('conv1', chan, 3, padding="VALID", activation=tf.identity)
-                .InstanceNorm('inorm')
-            )() + shortcut
+            )()
+            if norm_type == "instance":
+                conv_branch = InstanceNorm("inorm", conv_branch)
+            elif norm_type == "batch":
+                conv_branch = BatchNorm("bnorm", conv_branch)
+            else:
+                conv_branch = tf.identity(conv_branch, "nonorm")
+            return conv_branch + shortcut
 
     @ staticmethod
-    def build_pre_res_block(x, name, chan, first=False):
-        """The value of input is considered to be computed before normalization
-        and non-linearity. So the normalization and activation functions are
-        needed to be applied in the residual branch.
+    def build_pre_res_block(x, name, chan, pad_type, norm_type, act_type, first=False):
+        """The value of input should be after normalization but before non-linearity.
+        So the non-linearity function is needed to be applied in the residual branch.
 
         This implementation assumes that the input and output dimensions are
-        consistent. The upsampling and downsampling are implemented in other
-        modules such as Conv2D_Transpose and Conv2d, or resize_nearest_neighbor
-        and avg_pool.
+        consistent. The upsampling and downsampling steps are implemented in other
+        modules such as Conv2D_Transpose and Conv2d, or tile and avg_pool.
         """
         with tf.variable_scope(name):
             assert x.get_shape().as_list()[-1] == chan
             shortcut = x
-            res_input = INReLU(x, "act_input")
+            if norm_type == "instance":
+                res_input = InstanceNorm("inorm", x)
+            elif norm_type == "batch":
+                res_input = BatchNorm("bnorm", x)
+            else:
+                res_input = tf.nn.identity(x, "nonorm")
+            if act_type == "relu":
+                res_input = tf.nn.relu(res_input, "act_input")
+            else:
+                res_input = tf.nn.leaky_relu(res_input, alpha=0.2, name="act_input")
             return (LinearWrap(res_input)
-                .tf.pad([[0,0], [1,1], [1,1], [0,0]], mode="SYMMETRIC")
+                .tf.pad([[0,0], [1,1], [1,1], [0,0]], mode=pad_type)
                 .Conv2D("conv0", chan, 3, padding="VALID")
-                .tf.pad([[0,0], [1,1], [1,1], [0,0]], mode="SYMMETRIC")
+                .tf.pad([[0,0], [1,1], [1,1], [0,0]], mode=pad_type)
                 .Conv2D("conv1", chan, 3, padding="VALID", activation=tf.identity)
             )() + shortcut
 
     @staticmethod
-    def build_upsampling_nn(x, name, scale=2, chan=None, ksize=None):
+    def build_upsampling_nnconv(x, name, pad_type, scale=2, chan=None, ksize=None):
         _, h, w, c = x.get_shape().as_list()
-        new_size = [h*scale, w*scale]
         if chan is None:
             chan = c
         if ksize is None:
-            ksize = scale*2 + 1
-        p_start = ksize // 2
-        p_end = ksize - 1 - p_start
-        x_up = tf.image.resize_nearest_neighbor(x, size=new_size, name=name+"_nn")
-        x_up = tf.pad(x_up, [[0,0], [p_start, p_end], [p_start, p_end], [0,0]], mode="SYMMETRIC") 
-        return Conv2D(name, x_up, chan, ksize, padding="VALID", activation=tf.identity, use_bias=False)
+            ksize = scale*2 - 1
+        with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
+            if scale == 1:
+                x_up = x
+            else:
+                assert scale > 1
+                x = tf.reshape(x, [-1, h, 1, w, 1, c])
+                x_up = tf.tile(x, [1, 1, scale, 1, scale, 1], name="nn")
+                x_up = tf.reshape(x_up, [-1, h*scale, w*scale, c])
+            return PadConv2D(x_up, chan, ksize, pad_type, tf.identity, False, "conv")
 
     @staticmethod
-    def build_upsampling_deconv(x, name, scale=2, chan=None, ksize=None):
+    def build_upsampling_deconv(x, name, pad_type, scale=2, chan=None, ksize=None):
         if chan is None:
             chan = x.get_shape().as_list()[-1]
         if ksize is None:
@@ -139,18 +201,59 @@ class AdaptiveSynTex(SynTexModelDesc):
         return Conv2DTranspose(name, x, chan, ksize,
             strides=scale, activation=tf.identity, use_bias=False)
 
-    def build_stage(self, pre_image_input, gram_target, name="stage"):
+    def build_stage_preparation(self, image_input, gram_target, coefs, name="prep"):
+        layers = list(coefs.keys())
+        loss_per_layer = OrderedDict()
+        with tf.name_scope(name):
+            feat_input = self._vgg19.build(image_input, topmost=layers[-1])
+            for k in layers:
+                gram_input = build_gram(feat_input[k], name="gram_"+k)
+                loss_per_layer[k] = tf.reduce_mean(tf.square(gram_input - gram_target[k]),
+                        axis=[1,2], name="l2_"+k)
+            if len(layers) > 0:
+                loss_input = tf.add_n([coefs[k]*1./4 * loss_per_layer[k] for k in layers],
+                        name="loss_input")
+            else:
+                loss_input = 0.
+            grads = tf.gradients(loss_input, [feat_input[k] for k in layers])
+            if self._stop_grad:
+                grads = [tf.stop_gradient(_g) for _g in grads]
+            grad_per_layer = OrderedDict(zip(layers, grads))
+        return feat_input, loss_input, loss_per_layer, grad_per_layer
+
+    def build_stage(self, pre_image_input, gram_target, n_loss_layer, name="stage"):
         res_block = AdaptiveSynTex.build_pre_res_block if self._pre_act \
             else AdaptiveSynTex.build_res_block
-        upsample = AdaptiveSynTex.build_upsampling_nn if self._nn_upsample \
+        upsample = AdaptiveSynTex.build_upsampling_nnconv if self._nn_upsample \
             else AdaptiveSynTex.build_upsampling_deconv
+        if self._norm_type == "instance":
+            norm = InstanceNorm
+            if self._act_type == "relu":
+                norm_act = INReLU
+            else:
+                norm_act = INLReLU
+        elif self._norm_type == "batch":
+            norm = BatchNorm
+            if self._act_type == "relu":
+                norm_act = BNReLU
+            else:
+                norm_act = BNLReLU
+        else:
+            norm = tf.identity
+            if self._act_type == "relu":
+                norm_act = NONReLU
+            else:
+                norm_act = NONLReLU
+        if self._act_type == "relu":
+            act = NONReLU
+        else:
+            act = NONLReLU
+        coefs = SynTexModelDesc.DEFAULT_COEFS
         with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
             # extract features and gradients
             image_input = self._act(pre_image_input, name="input_"+name)
-            feat_input, _ = self._build_extractor(image_input, calc_gram=False)
-            loss_overall_input, loss_layer_input, grad_layer = \
-                build_texture_loss(feat_input, gram_target,
-                    SynTexModelDesc.DEFAULT_COEFS, calc_grad=True, name="grad")
+            feat_input, loss_input, loss_per_layer, grad_per_layer = \
+                    self.build_stage_preparation(image_input, gram_target, coefs)
             # For an adaptive texture synthesizer, we provide gradients explicitly to
             # the synthesizer.
             #            none +
@@ -160,42 +263,44 @@ class AdaptiveSynTex(SynTexModelDesc):
             #                                                               ... ...
             #                                                 up[1] +
             #                                       grad[0] conv[0] -> res[0] -> output
-            with argscope([Conv2D, Conv2DTranspose], activation=INReLU, use_bias=False):
+            with argscope([Conv2D, Conv2DTranspose], activation=norm_act, use_bias=False):
                 first = True
                 for layer in reversed(feat_input):
-                    grad = grad_layer[layer]
-                    chan = grad.get_shape().as_list()[-1]
-                    with tf.variable_scope(layer):
-                        # compute pseudo grad of current layer
-                        grad = Conv2D("grad_conv1", grad, chan, 3)
-                        grad = Conv2D("grad_conv2", grad, chan, 3, activation=tf.identity)
-                        # merge with grad from deeper layers
-                        if first:
-                            delta = tf.identity(grad, name="grad_merged")
-                            first = False
-                        else:
-                            # upsample deeper grad
-                            if self._pre_act:
-                                delta = INReLU(delta, "pre_inrelu")
+                    if layer in grad_per_layer:
+                        grad = grad_per_layer[layer]
+                        chan = grad.get_shape().as_list()[-1]
+                        with tf.variable_scope(layer):
+                            # compute pseudo grad of current layer
+                            grad = PadConv2D(grad, chan, self._grad_ksize, self._pad_type, norm_act, False, "grad_conv1")
+                            grad = PadConv2D(grad, chan, self._grad_ksize, self._pad_type, tf.identity, False, "grad_conv2")
+                            # merge with grad from deeper layers
+                            if first:
+                                delta = tf.identity(grad, name="grad_merged")
+                                first = False
                             else:
-                                delta = tf.nn.relu(delta, "pre_relu")
-                            delta = upsample(delta, "up", chan=chan)
-                            # add two grads
-                            delta = tf.add(grad, delta, name="grad_merged")
-                        if not self._pre_act:
-                            delta = InstanceNorm("post_inorm", delta)
-                        # simulate the backpropagation procedure to next level
-                        for k in range(self._n_block):
-                            delta = res_block(delta, "res{}".format(k), chan, first=(k == 0))
+                                # upsample deeper grad
+                                if self._pre_act:
+                                    delta = norm_act(delta, "pre_inrelu")
+                                else:
+                                    delta = act(delta, "pre_relu")
+                                delta = upsample(delta, "up", self._pad_type, chan=chan) # not normalized nor activated
+                                # add two grads
+                                delta = tf.add(grad, delta, name="grad_merged")
+                            if not self._pre_act:
+                                delta = norm("post_inorm", delta)
+                            # simulate the backpropagation procedure to next level
+                            for k in range(self._n_block):
+                                delta = res_block(delta, "res{}".format(k), chan,
+                                        self._pad_type, self._norm_type,
+                                        self._act_type, first=(k == 0))
                 # output
                 if self._pre_act:
-                    delta = INReLU(delta, "actlast")
+                    delta = norm_act(delta, "actlast")
                 else:
-                    delta = tf.nn.relu(delta, "actlast")
-                delta = tf.pad(delta, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="SYMMETRIC")
-                delta_input = Conv2D("convlast", delta, 3, 3, padding="VALID", activation=tf.identity, use_bias=True)
+                    delta = act(delta, "actlast")
+                delta_input = PadConv2D(delta, 3, 3, self._pad_type, tf.identity, True, "convlast")
             pre_image_output = tf.add(pre_image_input, delta_input, name="pre_image_output")
-        return image_input, loss_overall_input, loss_layer_input, pre_image_output
+        return image_input, loss_input, loss_per_layer, pre_image_output
 
     def build_graph(self, pre_image_input, image_target):
         """
@@ -231,7 +336,7 @@ class AdaptiveSynTex(SynTexModelDesc):
         with tf.variable_scope("syn"):
             for s in range(self._n_stage):
                 image_input, loss_overall_input, _, pre_image_output = \
-                    self.build_stage(pre_image_output, gram_target, name="stage%d" % s)
+                    self.build_stage(pre_image_output, gram_target, s+1, name="stage%d" % s)
                 self.image_outputs.append(image_input)
                 self.losses.append(tf.reduce_mean(loss_overall_input, name="loss%d" % s))
         self.collect_variables("syn")
@@ -258,23 +363,28 @@ class AdaptiveSynTex(SynTexModelDesc):
         add_moving_summary(self.loss, *self.losses, *self.loss_layer_output.values())
 
     def optimizer(self):
-        lr = tf.get_variable("learning_rate", initializer=self._lr, trainable=False)
-        return tf.train.AdamOptimizer(lr, beta1=self._beta1, beta2=self._beta2, epsilon=1e-3)
+        lr_var = tf.get_variable("learning_rate", initializer=self._lr, trainable=False)
+        add_tensor_summary(lr_var, ['scalar'], main_tower_only=True)
+        return tf.train.AdamOptimizer(lr_var, beta1=self._beta1, beta2=self._beta2, epsilon=1e-3)
 
 
-def get_data(datadir, size=IMAGESIZE, isTrain=True):
+def get_data(datadir, size=IMAGESIZE, isTrain=True, zmin=-1, zmax=1):
     if isTrain:
         augs = [
+            imgaug.ResizeShortestEdge(int(size*1.143)),
             imgaug.RandomCrop(size),
             imgaug.Flip(horiz=True),
         ]
     else:
-        augs = [imgaug.CenterCrop(size)]
+        augs = [
+            imgaug.ResizeShortestEdge(int(size*1.143)),
+            imgaug.CenterCrop(size)]
+
 
     def get_images(dir):
         files = sorted(glob.glob(os.path.join(dir, "*.jpg")))
         df = ImageFromFile(files, channel=3, shuffle=isTrain)
-        random_df = RandomZData([size, size, 3], -1, 1)
+        random_df = RandomZData([size, size, 3], zmin, zmax)
         return JoinData([random_df, AugmentImageComponent(df, augs)])
     
     names = ['train']  if isTrain else ['test']
@@ -309,40 +419,56 @@ class VisualizeTestSet(Callback):
 
 if __name__ == "__main__":
     ps = AdaptiveSynTex.get_parser()
-    ps.add("--data-folder", type=str, default="../images/single_12")
-    ps.add("--save-folder", type=str, default="train_log/single_model")
-    ps.add("--steps-per-epoch", type=int, default=1000)
-    ps.add("--max-epoch", type=int, default=200)
-    ps.add("--save-epoch", type=int, default=20)
-    ps.add("--image-steps", type=int, default=100)
+    ps.add("--data-folder", type=str, default="../images/scaly")
+    ps.add("--save-folder", type=str, default="train_log/impr")
+    ps.add("--steps-per-epoch", type=int, default=STEPS_PER_EPOCH)
+    ps.add("--max-epoch", type=int, default=MAX_EPOCH)
+    ps.add("--save-epoch", type=int, help="Save parameters every n epochs")
+    ps.add("--image-steps", type=int, help="Synthesize images every n steps")
+    ps.add("--scalar-steps", type=int, help="Period to add scalar summary", default=0)
+    ps.add("--batch-size", type=int)
     args = ps.parse_args()
     print("Arguments")
     ps.print_args()
     print()
 
-    data_folder = args.get("data_folder", "../images/single_12")
-    save_folder = args.get("save_folder", "train_log/single_model")
-    image_size = args.get("image_size", IMAGESIZE)
-    steps_per_epoch = args.get("steps_per_epoch", 1000)
-    max_epoch = args.get("max_epoch", 200)
-    save_epoch = args.get("save_epoch", max_epoch // 10)
-    image_steps = args.get("image_steps", 100)
-    lr = args.get("lr", LR)
+    data_folder = args.get("data_folder")
+    save_folder = args.get("save_folder")
+    image_size = args.get("image_size")
+    max_epoch = args.get("max_epoch")
+    save_epoch = args.get("save_epoch") or max_epoch // 10
+    # Scale lr and steps_per_epoch accordingly.
+    # Make sure the total number of gradient evaluations is consistent.
+    n_gpu = args.get("n_gpu") or 1
+    batch_size = (args.get("batch_size") or BATCH)
+    equi_batch_size = max(n_gpu, 1) * batch_size
+    lr = args.get("lr") or LR
+    lr *= equi_batch_size
+    steps_per_epoch = args.get("steps_per_epoch") or 1000
+    steps_per_epoch /= equi_batch_size
+    image_steps = args.get("image_steps") or steps_per_epoch // 10
+    scalar_steps = args.get("scalar_steps")
+    if scalar_steps > 0:
+        scalar_steps = max(scalar_steps // equi_batch_size, 1)
+    else:
+        scalar_steps = 0 # merge scalar summary every epoch
     # lr starts decreasing at half of max epoch
     start_dec_epoch = max_epoch // 2
-    # stop when lr is 0.01 of its initial value
+    # stops when lr is 0.01 of its initial value
     end_epoch = max_epoch - int((max_epoch - start_dec_epoch) * 0.01)
+    # adjust noise input range according to the input act
+    zmin, zmax = (0, 1) if args.get("act") == "identity" else (-1, 1)
 
     if save_folder == None:
         logger.auto_set_dir()
     else:
         logger.set_logger_dir(save_folder)
 
-    df = get_data(data_folder, image_size)
+    df = get_data(data_folder, image_size, zmin=zmin, zmax=zmax)
     df = PrintData(df)
     data = QueueInput(df)
 
-    SynTexTrainer(data, AdaptiveSynTex(args)).train_with_defaults(
+    SynTexTrainer(data, AdaptiveSynTex(args), n_gpu).train_with_defaults(
         callbacks=[
             PeriodicTrigger(ModelSaver(), every_k_epochs=save_epoch),
             PeriodicTrigger(ModelSaver(), every_k_epochs=end_epoch), # save model at last
@@ -350,7 +476,7 @@ if __name__ == "__main__":
                 'learning_rate',
                 [(start_dec_epoch, lr), (max_epoch, 0)], interp="linear"),
             #PeriodicTrigger(VisualizeTestSet(data_folder, image_size), every_k_epochs=10),
-            MergeAllSummaries(period=10), # scalar only
+            MergeAllSummaries(period=scalar_steps), # scalar only
             MergeAllSummaries(period=image_steps, key="image_summaries"),
         ],
         max_epoch= end_epoch,
