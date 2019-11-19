@@ -331,10 +331,11 @@ class ProgressiveSynTex(SynTexModelDesc):
                 im = tf.concat(images, axis=2)
                 #im = tf.transpose(im, [0, 2, 3, 1])
                 if self._act == tf.tanh:
-                    im = (im + 1.0) * 128
+                    im = (im + 1.0) * 127.5
                 else:
-                    im = im * 256
+                    im = im * 255
                 im = tf.clip_by_value(im, 0, 255)
+                im = tf.round(im)
                 im = tf.cast(im, tf.uint8, name="viz")
             tf.summary.image(name, im, max_outputs=10, collections=["image_summaries"])
 
@@ -458,6 +459,7 @@ def test_only(args):
     test_ds = get_data(data_folder, image_size, isTrain=False)
     test_ds.reset_state()
     idx = 0
+    losses = list()
     print("------------------ predict --------------")
     for pii, it in test_ds:
         output_array, loss_output = predictor(pii, it)
@@ -466,10 +468,11 @@ def test_only(args):
                 imsave(os.path.join(test_folder, "test-{}.jpg".format(idx)), output_array[i])
                 idx += 1
         else:
-            imsave(os.path.join(test_folder, "test-{}.jpg".format(idx)), output_array[i])
+            imsave(os.path.join(test_folder, "test-{}.jpg".format(idx)), output_array)
             idx += 1
+        losses.append(loss_output)
         print("loss #", idx, "=", loss_output)
-    print("Test and save", idx, "images to", test_folder)
+    print("Test and save", idx, "images to", test_folder, "avg loss =", np.mean(losses))
 
 def train(args):    
     data_folder = args.get("data_folder")
