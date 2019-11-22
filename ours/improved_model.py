@@ -18,7 +18,7 @@ MAX_EPOCH = 200
 STEPS_PER_EPOCH = 4000
 #
 IMAGESIZE = 224
-LR = 5e-5
+LR = 2e-4
 BETA1 = 0.5
 BETA2 = 0.999
 BATCH = 1
@@ -106,14 +106,14 @@ class ProgressiveSynTex(SynTexModelDesc):
         ps.add("--n-stage", type=int, default=5, help="This argument is fixed to 5.")
         ps.add("--n-block", type=int, default=2, help="number of res blocks in each scale.")
         ps.add("--act", type=str, default="sigmoid", choices=["sigmoid", "identity"])
-        ps.add("--loss-scale", type=float, default=1.)
-        ps.add("--pad-type", type=str, default="reflect", choices=["reflect", "zero", "symmetric"])
+        ps.add("--loss-scale", type=float, default=1., help="Multiplier of the weights for losses from different stages. The weight for the last stage is 1 and the other stage is {scale}^{stage}.")
+        ps.add("--pad-type", type=str, default="zero", choices=["reflect", "zero", "symmetric"])
         ps.add("--grad-ksize", type=int, default=3)
         ps.add("--norm-type", type=str, default="instance", choices=["instance", "batch", "none"])
-        ps.add("--act-type", type=str, default="relu", choices=["relu", "lrelu"])
-        ps.add_flag("--pre-act")
-        ps.add_flag("--deconv-upsample")
-        ps.add_flag("--stop-grad")
+        ps.add("--act-type", type=str, default="lrelu", choices=["relu", "lrelu"])
+        ps.add_flag("--pre-act", help="Use pre-act residual blocks")
+        ps.add_flag("--deconv-upsample", help="Use deconv upsampling. Default is nearest neighbor upsampling.")
+        ps.add_flag("--stop-grad", help="The loss of each stage only contributes to the parameter in the current stage.")
         ps.add("--n-gpu", type=int, default=1)
         return ps
 
