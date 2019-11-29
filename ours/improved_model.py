@@ -375,8 +375,9 @@ class ProgressiveSynTex(SynTexModelDesc):
         self.loss = tf.add_n([weights[i] * loss \
             for i, loss in enumerate(reversed(self.losses[1:]))], name="loss")
         # summary
-        viz("stages-target", self.image_outputs + [image_target])
-        add_moving_summary(self.loss, *self.losses, *self.loss_layer_output.values())
+        with tf.device("/cpu:0"):
+            viz("stages-target", self.image_outputs + [image_target])
+            add_moving_summary(self.loss, *self.losses, *self.loss_layer_output.values())
 
     def optimizer(self):
         lr_var = tf.get_variable("learning_rate", initializer=self._lr, trainable=False)
@@ -384,7 +385,7 @@ class ProgressiveSynTex(SynTexModelDesc):
         return tf.train.AdamOptimizer(lr_var, beta1=self._beta1, beta2=self._beta2, epsilon=1e-3)
 
 
-def get_data(datadir, size=IMAGESIZE, isTrain=True, zmin=-1, zmax=1):
+def get_data(datadir, size=IMAGESIZE, isTrain=True, zmin=-1, zmax=1, batch=BATCH):
     if isTrain:
         augs = [
             imgaug.ResizeShortestEdge(int(size*1.143)),
@@ -405,7 +406,7 @@ def get_data(datadir, size=IMAGESIZE, isTrain=True, zmin=-1, zmax=1):
     
     names = ['train']  if isTrain else ['test']
     df = get_images(*[os.path.join(datadir, n) for n in names])
-    df = BatchData(df, BATCH if isTrain else TEST_BATCH)
+    df = BatchData(df, batch if isTrain else TEST_BATCH)
     return df
 
 
@@ -507,7 +508,7 @@ def train(args):
     else:
         logger.set_logger_dir(save_folder)
 
-    df = get_data(data_folder, image_size, zmin=zmin, zmax=zmax)
+    df = get_data(data_folder, image_size, zmin=zmin, zmax=zmax, batch=batch_size)
     df = PrintData(df)
     data = QueueInput(df)
 
@@ -519,7 +520,7 @@ def train(args):
                 'learning_rate',
                 [(start_dec_epoch, lr), (max_epoch, 0)], interp="linear"),
             #PeriodicTrigger(VisualizeTestSet(data_folder, image_size), every_k_epochs=10),
-            MergeAllSummaries(period=scalar_steps), # scalar only
+            #MergeAllSummaries(period=scalar_steps), # scalar only
             MergeAllSummaries(period=image_steps, key="image_summaries"),
         ],
         max_epoch= end_epoch,
