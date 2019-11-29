@@ -4,8 +4,7 @@ from collections import OrderedDict, defaultdict
 from scipy.optimize import minimize
 import cv2
 
-from aparse import ArgParser
-from text_utils import print_dict
+from syntex.aparse import ArgParser
 from syntex.texture_utils import Vgg19Extractor, build_gram, build_texture_loss
 
 def get_bounds(shape=None):

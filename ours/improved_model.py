@@ -10,7 +10,7 @@ from tensorpack import (InstanceNorm, LinearWrap, Conv2D, Conv2DTranspose,
     MergeAllSummaries, BatchNorm, PredictConfig, OfflinePredictor, SmartInit)
 from tensorpack.tfutils.summary import add_moving_summary, add_tensor_summary
 
-from aparse import ArgParser
+from syntex.aparse import ArgParser
 from syntex.texture_utils import build_texture_loss, build_gram
 from model import SynTexModelDesc, SynTexTrainer, RandomZData
 
