@@ -13,7 +13,7 @@ from tensorpack.utils import logger
 from tensorpack.utils.argtools import memoized_method
 
 from syntex.texture_utils import Vgg19Extractor, build_gram, build_texture_loss
-from aparse import ArgParser
+from syntex.aparse import ArgParser
 
 class SynTexModelDesc(ModelDescBase):
     """Texture Synthesis
