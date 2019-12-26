@@ -30,12 +30,12 @@ python xxx_model.py --help
 
 Run the following command to test a pretrained model from the checkpoint `PRETRAINED_MODEL_CKPT` and save the synthesized images to `TEST_FOLDER`
 ```
-CUDA_VISIBLE_DEVICES=0 python xxx_model.py --data-folder DATA_FOLDER --test-ckpt PRETRAINED_MODEL_CKPT --test-folder TEST_FOLDER
+CUDA_VISIBLE_DEVICES=0 python xxx_model.py --test-only --data-folder DATA_FOLDER --test-ckpt PRETRAINED_MODEL_CKPT --test-folder TEST_FOLDER
 ```
 
 ### Models
 
-* `improved_model.py` The latest model of the ProPO architecture with improved performance.
+* `improved_model.py` The latest model of the ProPO architecture with improved performance. Use this model to reproduce the results. The other models may not be up-to-date and may cause import errors.
 * `progressive_model.py` The model of the ProPO architecture without tuning.
 * `adaptive_model.py` The model of the AdaPO architecture.
 * `model.py` The base _ModelDesc_ class used by tensorpack.
