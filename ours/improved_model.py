@@ -84,12 +84,14 @@ class ProgressiveSynTex(SynTexModelDesc):
         pad_type = args.get("pad_type") or "reflect"
         if pad_type == "zero":
             self._pad_type = "CONSTANT"
+            
         else:
             self._pad_type = pad_type.upper()
         self._norm_type = args.get("norm_type") or "instance"
         self._act_type = args.get("act_type") or "relu"
         self._grad_ksize = args.get("grad_ksize") or 3
         self._stop_grad = args.get("stop_grad") or False
+        self._sync_stats = args.get("sync_stats")
 
     def inputs(self):
         return [tf.TensorSpec((None, self._image_size, self._image_size, 3), tf.float32, 'pre_image_input'),
@@ -105,16 +107,18 @@ class ProgressiveSynTex(SynTexModelDesc):
         ps.add("--beta2", type=float, default=BETA2)
         ps.add("--n-stage", type=int, default=5, help="This argument is fixed to 5.")
         ps.add("--n-block", type=int, default=2, help="number of res blocks in each scale.")
+
         ps.add("--act", type=str, default="sigmoid", choices=["sigmoid", "identity"])
         ps.add("--loss-scale", type=float, default=1., help="Multiplier of the weights for losses from different stages. The weight for the last stage is 1 and the other stage is {scale}^{stage}.")
         ps.add("--pad-type", type=str, default="zero", choices=["reflect", "zero", "symmetric"])
         ps.add("--grad-ksize", type=int, default=3)
-        ps.add("--norm-type", type=str, default="instance", choices=["instance", "batch", "none"])
+        ps.add("--norm-type", type=str, default="batch", choices=["instance", "batch", "none"])
         ps.add("--act-type", type=str, default="lrelu", choices=["relu", "lrelu"])
         ps.add_flag("--pre-act", help="Use pre-act residual blocks")
         ps.add_flag("--deconv-upsample", help="Use deconv upsampling. Default is nearest neighbor upsampling.")
         ps.add_flag("--stop-grad", help="The loss of each stage only contributes to the parameter in the current stage.")
         ps.add("--n-gpu", type=int, default=1)
+        ps.add("--sync-stats", type=str, choices=["nccl", "horovod"])
         return ps
 
     @staticmethod
@@ -233,13 +237,13 @@ class ProgressiveSynTex(SynTexModelDesc):
         upsample = ProgressiveSynTex.build_upsampling_nnconv if self._nn_upsample \
             else ProgressiveSynTex.build_upsampling_deconv
         if self._norm_type == "instance":
-            norm = InstanceNorm
+            norm = lambda _x, _name: InstanceNorm(_name, _x)
             if self._act_type == "relu":
                 norm_act = INReLU
             else:
                 norm_act = INLReLU
         elif self._norm_type == "batch":
-            norm = BatchNorm
+            norm = lambda _x, _name: BatchNorm(_name, _x)
             if self._act_type == "relu":
                 norm_act = BNReLU
             else:
@@ -295,7 +299,7 @@ class ProgressiveSynTex(SynTexModelDesc):
                                 # add two grads
                                 delta = tf.add(grad, delta, name="grad_merged")
                             if not self._pre_act:
-                                delta = norm("post_inorm", delta)
+                                delta = norm(delta, "post_inorm")
                             # simulate the backpropagation procedure to next level
                             for k in range(self._n_block):
                                 delta = res_block(delta, "res{}".format(k), chan,
@@ -347,9 +351,13 @@ class ProgressiveSynTex(SynTexModelDesc):
         pre_image_output = pre_image_input
         with tf.variable_scope("syn"):
             # TODO Due to the mistake of design, the batch size is always 1.
-            # Thus, batchnorm has not difference with instancenorm. We need
+            # Thus, batchnorm has no difference with instancenorm. We need
             # to set training=True for all phases.
+            # NOTE fixed the problem of unchangable batch size. Add sync option.
+            # NOTE (2020-03-02) The old models use batchnorm the names are not found if 
+            #         we simply set norm-type=instance. We disable batchnorm temporarily.
             with argscope(BatchNorm, training=True):
+            #with argscope(BatchNorm, sync_statistics=self._sync_stats):
                 for s in range(self._n_stage):
                     image_input, loss_overall_input, _, pre_image_output = \
                         self.build_stage(pre_image_output, gram_target, s+1, name="stage%d" % s)
