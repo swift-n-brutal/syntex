@@ -1,0 +1,1 @@
+The flower bed images are downloaded from [textures.com](https://www.textures.com/). Please read and follow their [term of use](https://www.textures.com/terms-of-use.html).
