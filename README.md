@@ -22,5 +22,7 @@ export PYTHONPATH=$PYTHONPATH:path/to
 ## Methods
 ### [gatys](gatys)
 An optimization based method proposed by [Gatys et al.](https://arxiv.org/pdf/1505.07376v3.pdf)
+![fig-gatys](figures/fig-gatys.png)
 ### [ours](ours)
 Feed-forward methods simulating the optimization procedure.
+![fig-po](figures/fig-po.png)
