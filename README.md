@@ -23,6 +23,6 @@ export PYTHONPATH=$PYTHONPATH:path/to
 ### [gatys](gatys)
 An optimization based method proposed by [Gatys et al.](https://arxiv.org/pdf/1505.07376v3.pdf)
 ![fig-gatys](figures/fig-gatys.png)
-### [ours](ours)
-Feed-forward methods simulating the optimization procedure.
+### [po](po)
+Fast Texture Synthesis via Pseudo Optimizer.
 ![fig-po](figures/fig-po.png)
