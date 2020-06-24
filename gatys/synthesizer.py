@@ -58,7 +58,7 @@ class Synthesizer(object):
         ph_is_preimage = tf.placeholder(tf.bool, shape=[], name="is_preimage")
         image_input = tf.cond(ph_is_preimage, lambda: tf.sigmoid(ph_input), lambda: ph_input, name="image_input")
         #
-        feat_input = vgg19.build(image_input, "ext_input")
+        feat_input = vgg19.build(image_input, name="ext_input")
         gram_input = OrderedDict()
         for k in Synthesizer.DEFAULT_COEFS:
             gram_input[k] = build_gram(feat_input[k])
@@ -188,7 +188,7 @@ def test_single(syn, image_target, is_preimage):
     return image_syn, func
     
 def test():
-    from imageio import imread
+    from imageio import imread, imwrite
     import time
     import sys, os
 
@@ -197,7 +197,7 @@ def test():
 
     ps = Synthesizer.get_parser()
     ps.add("--image-path", type=str, default="../images/flower_beds_256/FlowerBeds0008_256.jpg")
-    ps.add("--image-folder", type=str, default="../images/scaly/train")
+    ps.add("--image-folder", type=str, default="../images/honeycombed/train")
     ps.add("--save-folder", type=str, default="train_log")
     ps.add_flag("--batch-test")
     ps.add("--batch-test-start", type=int, default=0)
@@ -247,13 +247,14 @@ def test():
                 save_path = os.path.join(save_folder, name.rsplit('.', 1)[0]+".npz")
                 syn.save_verbose(save_path)
                 #
-                imdp.show_images([
-                    (get_plottable_data(image_target, scale=255.), "Original"),
-                    (get_plottable_data(image_syn, scale=255.), "%.4e" % func)],
-                    wait=False, fig_id=1)
+                #imdp.show_images([
+                #    (get_plottable_data(image_target, scale=255.), "Original"),
+                #    (get_plottable_data(image_syn, scale=255.), "%.4e" % func)],
+                #    wait=False, fig_id=1)
                 save_path = os.path.join(save_folder, name)
-                imdp.savefig(save_path)
-                imdp.clear()
+                #imdp.savefig(save_path)
+                #imdp.clear()
+                imwrite(save_path, get_plottable_data(image_syn, scale=255.))
         else:
             image_path = args.get("image_path")
             image_target = imread(image_path, pilmode="RGB") / 255.

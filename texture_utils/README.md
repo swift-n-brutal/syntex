@@ -5,5 +5,5 @@
 # Pretrained VGG Models
 
 Pretrained VGG models are provided in the following repos:
-* [caffemodel][caffemodel]: Download the prototxt file Models/VGG_ave_pool_deploy.prototxt and the caffemodel file in the README. Convert the caffemodel file to a npz file using [caffe2npz.py](caffe2npz.py)
-* [t7 and npz][t7_npz]
+* [caffemodel][caffemodel]: Download the prototxt file Models/VGG_ave_pool_deploy.prototxt and the caffemodel file in the README. Convert the caffemodel file to a npz file using [caffe2npz.py](caffe2npz.py).
+* [t7 and npz][t7_npz] Download the pre-trained VGG19 normalised network in npz format.
