@@ -24,5 +24,5 @@ export PYTHONPATH=$PYTHONPATH:path/to
 An optimization based method proposed by [Gatys et al.](https://arxiv.org/pdf/1505.07376v3.pdf)
 ![fig-gatys](figures/fig-gatys.png)
 ### [po](po)
-Fast Texture Synthesis via Pseudo Optimizer.
+Fast Texture Synthesis via Pseudo Optimizer. [Paper](https://openaccess.thecvf.com/content_CVPR_2020/html/Shi_Fast_Texture_Synthesis_via_Pseudo_Optimizer_CVPR_2020_paper.html)
 ![fig-po](figures/fig-po.png)
